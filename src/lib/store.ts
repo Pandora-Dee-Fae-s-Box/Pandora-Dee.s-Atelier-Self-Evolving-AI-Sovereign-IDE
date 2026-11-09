@@ -1,3 +1,7 @@
+import { viewH, viewW } from "./zoom.ts";
+import { REL_DEFAULT, type RelLabels } from "./peopleCore.ts";
+import type { Ledger } from "./meterCore.ts";
+import type { OwnLog, OwnTime } from "./ownTimeCore.ts";
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import { BUILT_IN, DEFAULT_ROOM, type Character, type Look } from "./characters.ts";
@@ -8,7 +12,7 @@ import { MAX_IN_ROOM, type Message, type Source } from "./room.ts";
 import { VOICE_DEFAULT, type VoicePrefs } from "./voice.ts";
 import { VOICE_ENGINES_DEFAULT, type VoiceEnginePrefs } from "./voiceEngines.ts";
 import type { Sealed } from "./secure.ts";
-import { pythonFrom, type Via } from "./outbound.ts";
+import { noticesFrom, pythonFrom, type Via } from "./outbound.ts";
 import { MUSIC_DEFAULT, type MusicPrefs } from "./musicPrefs.ts";
 import { MEDIA_DEFAULT, type MediaPrefs } from "./mediaPrefs.ts";
 import { BROWSER_DEFAULT, type BrowserPrefs } from "./browserPrefs.ts";
@@ -20,8 +24,12 @@ export type AppId =
   | "presence"
   | "cast"
   | "files"
+  | "explorer"
   | "notes"
   | "music"
+  | "theater"
+  | "pads"
+  | "luanti"
   | "visualizer"
   | "create"
   | "browser"
@@ -42,15 +50,19 @@ export const APPS: { id: AppId; title: string; hint: string }[] = [
   { id: "cast", title: "Characters", hint: "Who's here, who's available, and their profiles" },
   { id: "notes", title: "Notes", hint: "Your notes: links, tags, tasks, graph" },
   { id: "music", title: "Music", hint: "Your music, internet radio and visualizers" },
+  { id: "theater", title: "Theater", hint: "Your videos, kept on the desktop: back them up from phones and watch them anywhere" },
   { id: "visualizer", title: "Visualizer", hint: "The music's visualizer in its own window" },
   { id: "vector", title: "Vector", hint: "Your Vector messenger: chats, Communities and Mini Apps" },
   { id: "browser", title: "Browser", hint: "Web pages in tabs, with a reader view" },
   { id: "create", title: "Create", hint: "Pictures and PDFs: a gallery, a painter, and GIMP and other apps to open them in" },
+  { id: "explorer", title: "Explorer", hint: "Your files: the vault, Vector's files, music, and more" },
   { id: "files", title: "Files", hint: "Each character's own files" },
   { id: "journal", title: "Journal", hint: "Quest journals and memory" },
   { id: "terminal", title: "Terminal", hint: "A shell over a character's files" },
   { id: "games", title: "Games & Apps", hint: "Games and Vector apps (webxdc) to play together" },
   { id: "studio", title: "XDC Studio", hint: "Open, edit and version webxdc apps" },
+  { id: "luanti", title: "Luanti", hint: "Cryptechtest and other Luanti servers: play on the real Luanti" },
+  { id: "pads", title: "PADS", hint: "Your devices, arranged like monitors: Pandora's Atelier's Distributed Systems" },
   { id: "connections", title: "Connections", hint: "Discord, Vector and tool servers" },
   { id: "sentry", title: "Sentry", hint: "Flood gate and device watch" },
   { id: "keys", title: "Keys", hint: "API keys and tokens, kept on this computer" },
@@ -58,9 +70,15 @@ export const APPS: { id: AppId; title: string; hint: string }[] = [
   { id: "welcome", title: "Getting started", hint: "What this is and how to start" },
 ];
 
+/** Toddler mode: the fun things (making and watching media, games, notes, Hangout) with every AI feature off.
+ *  The adult passcode turns it off again. Classic is AI too, so it waits as well. */
+export const TODDLER_APPS: string[] = ["notes", "music", "theater", "visualizer", "create", "games", "welcome", "hangout"];
+export const inToddler = (id: string) => TODDLER_APPS.includes(id);
+
 export type Win = { open: boolean; min: boolean; max: boolean; x: number; y: number; w: number; h: number; z: number };
 
-export type Account = { name: string; role: Role; picture: string; sealed: Sealed | null };
+/** `travels`: this account's desktop is kept on the desktop's server, to pick up on the person's other devices (lib/travel.ts). */
+export type Account = { name: string; role: Role; picture: string; sealed: Sealed | null; travels?: boolean };
 
 export type BridgeId = "discord" | "vector";
 
@@ -121,6 +139,25 @@ export const BRIDGE_DEFAULT = (id: BridgeId): Bridge => ({
 
 export type Exposure = "codemode" | "deferred" | "direct" | "hidden";
 
+export type Cat = { id: string; name: string; coat: string; marks: string; belly: string; eyes: string };
+
+export const CAT_COATS: { label: string; coat: string; marks: string; belly: string }[] = [
+  { label: "Grey tabby", coat: "#8a8794", marks: "#4e4b57", belly: "#d9d4de" },
+  { label: "Orange tabby", coat: "#e3954a", marks: "#b05f22", belly: "#f6dcc0" },
+  { label: "Black", coat: "#2b2733", marks: "#1a1720", belly: "#3a3542" },
+  { label: "White", coat: "#f3f0f4", marks: "#d8d2dc", belly: "#ffffff" },
+  { label: "Brown tabby", coat: "#9a7656", marks: "#5d4430", belly: "#e2d2c0" },
+  { label: "Cream", coat: "#ecd9b4", marks: "#cfb88d", belly: "#faf1df" },
+  { label: "Blue-grey", coat: "#7d8aa0", marks: "#5f6b80", belly: "#c9d0dc" },
+];
+
+export const CATS_DEFAULT: { on: boolean; size: number; list: Cat[]; follow: boolean } = {
+  on: false,
+  size: 1,
+  follow: false,
+  list: [{ id: "mrrowr-murrr", name: "Mrrowr-murrr", coat: "#8a8794", marks: "#4e4b57", belly: "#d9d4de", eyes: "#a6d96a" }],
+};
+
 export type McpServer = {
   id: string;
   name: string;
@@ -138,7 +175,14 @@ export type McpServer = {
   description?: string;
   /** How requests are sent; empty follows Connections → Web's default. */
   via?: Via;
+  /** A character's own server (from her mcp.json): only she gets its tools. Empty: every character. */
+  owner?: string;
+  /** A program the desktop runs and talks to over its stdin/stdout (mcp.json "command"), once the locksmith allows it.
+   *  ${KEY_NAME} in args and env come from Keys. */
+  stdio?: StdioSpec;
 };
+
+export type StdioSpec = { command: string; args?: string[]; env?: Record<string, string>; cwd?: string };
 
 export type WebPrefs = { search: "auto" | "ollama" | "searxng" | "ddg" | "wikipedia"; searx: string };
 
@@ -180,6 +224,9 @@ export type SshHost = {
 export type InboxItem = { id: string; at: number; from: string; where: string; via: "vector" | "discord" | "desk"; text: string; note?: string; urgent?: boolean; done?: boolean };
 
 /** A saved conversation. The open one's messages live in `messages`; the others are files in the vault. */
+/** A room of its own (lib/rooms.ts): a device's, which others can join. The Home room is the one every desk had. */
+export type RoomMeta = { id: string; name: string; device: string; made: number };
+
 export type ChatMeta = {
   id: string;
   title: string;
@@ -213,6 +260,8 @@ export type ChatPrefs = {
   autoJournal: boolean;
   /** ...and keep what they learned in memory. */
   learnFacts: boolean;
+  /** ...and write the chat as the next scene of its branch's book, in two voices (lib/storybook.ts). */
+  storybook: boolean;
   /** Log each reply for fine-tuning (kept on this computer). */
   trajectories: boolean;
   /** With many skills: hide the list and let characters look skills up with find. */
@@ -238,6 +287,7 @@ export const CHAT_DEFAULT: ChatPrefs = {
   stampTimes: false,
   autoJournal: false,
   learnFacts: false,
+  storybook: false,
   trajectories: false,
   skillRouter: false,
   thinking: "collapsed",
@@ -263,6 +313,8 @@ export type NotesPrefs = {
 export const NOTES_DEFAULT: NotesPrefs = { templates: "Templates", daily: "Daily", dailyFormat: "YYYY-MM-DD", dailyTemplate: "", view: "split", panel: true, seeded: false };
 
 /** One character's own settings. Anything left out follows the shared defaults. */
+export type OutsideMail = { id: string; source: "discord" | "vector"; chatId: string; msgId?: string; author: string; text: string; at: number; isGroup: boolean };
+
 export type CharPrefs = {
   look: Look;
   connection?: string;
@@ -273,9 +325,54 @@ export type CharPrefs = {
   /** How much they tend to say. */
   length?: "short" | "normal" | "long";
   /** volume here is relative to the master voice volume, 0..1.5. */
-  voice?: { on?: boolean; voiceName?: string; rate?: number; pitch?: number; volume?: number; engine?: string; engineVoice?: string };
+  voice?: {
+    on?: boolean;
+    voiceName?: string;
+    rate?: number;
+    pitch?: number;
+    volume?: number;
+    engine?: string;
+    engineVoice?: string;
+    /** A recording of how they should sound (a vault path), what's said in it, and how long it is: for engines that clone. */
+    sample?: string;
+    sampleText?: string;
+    sampleSeconds?: number;
+  };
   /** Their full avatar (Live2D, VRM, or an animated picture), kept in the vault. */
   avatar?: AvatarAsset;
+  /** Vector memory, as in Classic (Config → Embeddings): her memory, journal and notes searchable by meaning. */
+  memory?: MemoryPrefs;
+  /** Classic's thinkOn: she thinks before answering (models that can). Unset: everyone's setting. */
+  think?: boolean;
+  /** Classic's journalOn and memoryOn: after a chat, she writes in her journal / keeps what she learned. Unset: everyone's. */
+  journal?: boolean;
+  learn?: boolean;
+  /** Classic's Storybook: after a chat, she writes its next scene. Unset: everyone's. */
+  storybook?: boolean;
+  /** Classic's helper model (auxProv/auxModel): what her background work runs on (journal, memory, heartbeat). */
+  helper?: { connection?: string; model?: string };
+  /** Her own budget for work she starts herself (heartbeats, her own time), in tokens: lib/meterCore.ts. She can set it with the usage tool. */
+  budget?: { hourTokens?: number; dayTokens?: number };
+  /** Time of her own while the house is quiet (lib/ownTimeCore.ts). Off until switched on. */
+  ownTime?: OwnTime;
+  /** Her files on disk too (lib/bodies.ts), in Classic's layout, so her other bodies share them. Off until switched on. */
+  body?: boolean;
+  /** Classic's heartbeat: she checks in on her own, every so often, within her hours (lib/heartbeat.ts). */
+  heartbeat?: { on: boolean; everyMin: number; from: string; to: string; prompt: string };
+};
+
+export type MemoryPrefs = {
+  /** Keep her index of memory, journal (and notes) with embeddings. Off: keyword search only. */
+  vectors?: boolean;
+  /** Only the memory lines that fit the conversation go in the prompt, ranked by meaning and keywords. */
+  rag?: boolean;
+  /** How many lines when ranking. */
+  ragK?: number;
+  /** Index her other notes too, not only memory and journal. */
+  notes?: boolean;
+  /** The connection and model that make the embeddings (empty: her own connection, then Ollama on this computer). */
+  connection?: string;
+  model?: string;
 };
 
 export type ClassicApp = "pandora" | "jade";
@@ -313,8 +410,10 @@ export type HangPrefs = {
   chat: "full" | "bar" | "off";
   /** Keep the controls on screen instead of hiding them when idle. */
   pinControls: boolean;
-  /** How dark the scene is, 0 (bright) to 0.8. */
+  /** How dark the scene is, 0 (bright) to 0.8, in Hangout and behind the desktop's windows alike. */
   dim: number;
+  /** Windows shown over the scene in Hangout (picked from its right-click menu); the rest stay out of the way. */
+  windows: AppId[];
 };
 
 export const HANG_DEFAULT: HangPrefs = {
@@ -330,6 +429,7 @@ export const HANG_DEFAULT: HangPrefs = {
   chat: "full",
   pinControls: false,
   dim: 0.15,
+  windows: [],
 };
 
 export type DockItem = AppId | "hangout" | "classic" | "|";
@@ -352,6 +452,8 @@ export type DockPrefs = {
   createAdded?: boolean;
   browserAdded?: boolean;
   vectorAdded?: boolean;
+  explorerAdded?: boolean;
+  theaterAdded?: boolean;
 };
 
 export const DOCK_DEFAULT: DockPrefs = {
@@ -390,10 +492,21 @@ export type State = {
   custom: Character[];
   files: Record<string, Record<string, string>>;
   charPrefs: Record<string, CharPrefs>;
+  /** Each character's measurements: what every model call cost her (lib/meterCore.ts). */
+  meter: Record<string, Ledger>;
+  /** When each character last had time of her own, and what she did (lib/ownTimeCore.ts). */
+  ownLog: Record<string, OwnLog>;
   // room
   members: string[];
   focus: string;
   messages: Message[];
+  /** Messages removed from this room's conversation lately, so a device that still has them doesn't bring them back. */
+  gone: string[];
+  /** The rooms besides Home (every device sees the list). */
+  rooms: RoomMeta[];
+  /** The room this device is in ("" = Home), and the rooms it keeps as tabs. Each device's own. */
+  roomId: string;
+  roomTabs: string[];
   loopBreak: boolean;
   freeTalk: boolean;
   // AI
@@ -412,7 +525,9 @@ export type State = {
   /** Voice engines (speaking and listening) and which one turns your speech into text. */
   voices: VoiceEnginePrefs;
   sentryLog: string[];
-  sensors: { battery: boolean; network: boolean; screen: boolean; tellRoom: boolean };
+  /** The fserve (lib/fserve.ts): where links to big files point, and how big a file goes as an attachment. */
+  fserve: { linkBase: string; attachMB: number };
+  sensors: { battery: boolean; network: boolean; screen: boolean; tellRoom: boolean; /** new devices on the local network (watched from the desktop's own computer) */ lan?: boolean };
   hangout: boolean;
   hang: HangPrefs;
   dock: DockPrefs;
@@ -428,6 +543,12 @@ export type State = {
   /** Shortcut bindings the person changed, by action id. */
   keys: Record<string, string>;
   touch: { edgeSwipe: boolean; doubleTapScene: boolean; longPress: boolean };
+  /** Cats on the desktop; the first one listed is the senior cat. */
+  cats: { on: boolean; size: number; list: Cat[]; follow: boolean };
+  /** Memory on this device (Settings → Memory; off until switched on). */
+  memory: { unloadMinimizedMin: number; freeHiddenMin: number };
+  /** How the characters refer to people when there's no name to use (the People layer, lib/peopleCore.ts). */
+  people: RelLabels;
   /** Where each character stands in the scene, as shares of the screen (feet position). */
   spots: Record<string, { x: number; y: number }>;
   web: WebPrefs;
@@ -439,12 +560,17 @@ export type State = {
   sshHosts: SshHost[];
   sshOn: boolean;
   inbox: InboxItem[];
+  /** Bridge messages (Vector, Discord) for characters voiced from outside, waiting until whoever speaks for them reads
+   *  them through the inbound API (/v1/inbox) and answers (/v1/reply). By character id. */
+  outsideMail: Record<string, OutsideMail[]>;
   libView: LibView;
   libSort: LibSort;
   libSection: LibSection;
   appPrefs: Record<string, AppPrefs>;
   /** The webxdc version open in XDC Studio. */
   studioPkg: string;
+  /** Toddler mode (kept across restarts until the passcode turns it off). */
+  toddler: boolean;
 
   // memory only (not saved)
   session: string | null;
@@ -480,12 +606,20 @@ function withNotes(d: DockPrefs): DockPrefs {
     const at = items.indexOf("room");
     items.splice(at < 0 ? 0 : at + 1, 0, "vector");
   }
-  return { ...d, items, notesAdded: true, musicAdded: true, createAdded: true, browserAdded: true, vectorAdded: true };
+  if (!items.includes("explorer") && !d.explorerAdded) {
+    const at = items.indexOf("files");
+    items.splice(at < 0 ? items.length : at, 0, "explorer");
+  }
+  if (!items.includes("theater") && !d.theaterAdded) {
+    const at = items.indexOf("music");
+    items.splice(at < 0 ? items.length : at + 1, 0, "theater");
+  }
+  return { ...d, items, notesAdded: true, musicAdded: true, createAdded: true, browserAdded: true, vectorAdded: true, explorerAdded: true, theaterAdded: true };
 }
 
 export function defaultWins(): Record<AppId, Win> {
-  const vw = typeof window === "undefined" ? 1440 : window.innerWidth;
-  const vh = typeof window === "undefined" ? 900 : window.innerHeight - 110;
+  const vw = viewW();
+  const vh = viewH() - 110;
   const wide = vw >= 1180;
   const presW = Math.min(360, Math.max(280, Math.round(vw * 0.3)));
   const presX = vw - presW - 16;
@@ -498,8 +632,10 @@ export function defaultWins(): Record<AppId, Win> {
     presence: W(presX, 12, presW, presH, true),
     cast: W(12, 12, castW || 260, Math.max(320, vh - 20), wide),
     files: W(140, 80, 760, 520),
+    explorer: W(120, 40, Math.min(1000, vw - 40), Math.min(640, vh - 10)),
     notes: W(110, 30, Math.min(1080, vw - 40), Math.min(700, vh - 10)),
     music: W(150, 40, Math.min(960, vw - 40), Math.min(620, vh - 10)),
+    theater: W(170, 50, Math.min(980, vw - 40), Math.min(660, vh - 10)),
     visualizer: W(220, 60, Math.min(720, vw - 40), Math.min(440, vh - 10)),
     create: W(100, 30, Math.min(1120, vw - 40), Math.min(720, vh - 10)),
     browser: W(80, 24, Math.min(1180, vw - 40), Math.min(760, vh - 10)),
@@ -509,6 +645,8 @@ export function defaultWins(): Record<AppId, Win> {
     games: W(160, 40, Math.min(980, vw - 40), Math.min(660, vh - 10)),
     studio: W(120, 50, Math.min(980, vw - 40), Math.min(640, vh - 10)),
     connections: W(200, 70, 660, 580),
+    pads: W(140, 50, Math.min(1000, vw - 40), Math.min(640, vh - 10)),
+    luanti: W(180, 60, Math.min(760, vw - 40), Math.min(640, vh - 10)),
     sentry: W(220, 80, 620, 560),
     keys: W(240, 90, 520, 460),
     settings: W(180, 60, 760, 600),
@@ -585,9 +723,15 @@ const INITIAL: State = {
   custom: [],
   files: builtInFiles(),
   charPrefs: {},
+  meter: {},
+  ownLog: {},
   members: [...DEFAULT_ROOM],
   focus: DEFAULT_ROOM[0],
   messages: [],
+  gone: [],
+  rooms: [],
+  roomId: "",
+  roomTabs: [],
   loopBreak: true,
   freeTalk: false,
   model: MODEL_DEFAULT,
@@ -603,6 +747,7 @@ const INITIAL: State = {
   voice: VOICE_DEFAULT,
   voices: VOICE_ENGINES_DEFAULT,
   sentryLog: [],
+  fserve: { linkBase: "", attachMB: 8 },
   sensors: { battery: false, network: false, screen: false, tellRoom: false },
   hangout: false,
   hang: HANG_DEFAULT,
@@ -616,6 +761,9 @@ const INITIAL: State = {
   browser: BROWSER_DEFAULT,
   keys: {},
   touch: { edgeSwipe: true, doubleTapScene: true, longPress: true },
+  cats: CATS_DEFAULT,
+  memory: { unloadMinimizedMin: 0, freeHiddenMin: 0 },
+  people: { ...REL_DEFAULT },
   spots: {},
   web: { search: "auto", searx: "" },
   net: { via: "desktop" },
@@ -625,11 +773,13 @@ const INITIAL: State = {
   sshHosts: [],
   sshOn: false,
   inbox: [],
+  outsideMail: {},
   libView: "grid",
   libSort: "name",
   libSection: "all",
   appPrefs: {},
   studioPkg: "",
+  toddler: false,
   session: null,
   adultOpen: false,
   sensorPass: false,
@@ -646,9 +796,10 @@ export const useDesk = create<Store>()(
 
       openApp: (id) =>
         set((s) => {
+          if (s.toddler && !inToddler(id)) return {};
           // Keep the window on screen if the screen got smaller since it was last placed.
-          const vw = window.innerWidth;
-          const vh = window.innerHeight - 100;
+          const vw = viewW();
+          const vh = viewH() - 100;
           const w0 = s.wins[id];
           const w = Math.min(w0.w, vw - 16);
           const h = Math.min(w0.h, vh - 10);
@@ -666,8 +817,8 @@ export const useDesk = create<Store>()(
       arrange: (how) =>
         set((s) => {
           const open = APPS.filter((a) => s.wins[a.id].open && !s.wins[a.id].min).map((a) => a.id);
-          const vw = window.innerWidth;
-          const vh = window.innerHeight - 110;
+          const vw = viewW();
+          const vh = viewH() - 110;
           const wins = { ...s.wins };
           if (how === "cascade") {
             open.forEach((id, i) => (wins[id] = { ...wins[id], max: false, x: 30 + i * 32, y: 44 + i * 30, w: Math.min(720, vw - 80), h: Math.min(520, vh - 40) }));
@@ -760,12 +911,13 @@ export const useDesk = create<Store>()(
         set((s) => ({ messages: [...s.messages, { ...m, id, at: m.at ?? now() }].slice(-Math.min(5000, Math.max(400, s.chat.historyLimit + 50))) }));
         return id;
       },
-      patchMessage: (id, patch) => set((s) => ({ messages: s.messages.map((m) => (m.id === id ? { ...m, ...patch } : m)) })),
+      // (each change counted, so where two devices hold the same message, the one changed more often stands)
+      patchMessage: (id, patch) => set((s) => ({ messages: s.messages.map((m) => (m.id === id ? { ...m, ...patch, v: (m.v ?? 0) + 1 } : m)) })),
       notice: (text) => {
         get().post({ kind: "notice", who: "desk", name: "Desk", text, source: "desk" });
       },
-      clearRoom: () => set({ messages: [] }),
-      removeMessage: (id) => set((s) => ({ messages: s.messages.filter((m) => m.id !== id) })),
+      clearRoom: () => set((s) => ({ messages: [], gone: [...(s.gone ?? []), ...s.messages.map((m) => m.id)].slice(-300) })),
+      removeMessage: (id) => set((s) => ({ messages: s.messages.filter((m) => m.id !== id), gone: [...(s.gone ?? []), id].slice(-300) })),
 
       role: () => {
         const s = get();
@@ -774,10 +926,10 @@ export const useDesk = create<Store>()(
       },
       weigh: (text, source, role) => {
         const s = get();
-        if (role !== "keyholder" && !s.wake[source].includes(role)) return "Your account can't wake the characters from here. The keyholder can change that in Sentry.";
+        if (role !== "keyholder" && !s.wake[source].includes(role)) return "Your account can't wake the characters from here. An account with full access can change that in Sentry.";
         if (s.flood.shut) {
           if (role === "keyholder") return "";
-          return "The flood gate is shut, so the characters aren't reading or acting. The keyholder can reopen it in Sentry.";
+          return "The flood gate is shut, so the characters aren't reading or acting. An account with full access can reopen it in Sentry.";
         }
         if (!s.flood.armed) return "";
         const j = judge(s.flood.recent, text, now());
@@ -785,7 +937,7 @@ export const useDesk = create<Store>()(
           set({ flood: { ...s.flood, shut: true, reason: j.trip, at: now(), recent: [] } });
           s.log(`Flood gate shut: ${j.trip}`);
           s.openApp("sentry");
-          return `Flood gate shut: ${j.trip} The characters stopped and general access is off. The keyholder can still talk with them, and can reopen the gate in Sentry.`;
+          return `Flood gate shut: ${j.trip} The characters stopped and general access is off. Accounts with full access can still talk with them, and can reopen the gate in Sentry.`;
         }
         set({ flood: { ...s.flood, recent: j.recent } });
         return "";
@@ -800,7 +952,7 @@ export const useDesk = create<Store>()(
         })),
       reopenGate: () => {
         set((s) => ({ flood: { ...s.flood, shut: false, reason: "", recent: [] } }));
-        get().log("Flood gate reopened by the keyholder.");
+        get().log(`Flood gate reopened${get().session ? ` by ${get().session}` : ""}.`);
       },
       log: (line) => set((s) => ({ sentryLog: [`${new Date().toLocaleString()} · ${line}`, ...s.sentryLog].slice(0, 200) })),
       say: (text) => {
@@ -835,6 +987,9 @@ export const useDesk = create<Store>()(
           wins: { ...defaultWins(), ...(p.wins ?? {}) },
           files,
           model: { ...MODEL_DEFAULT, ...(p.model ?? {}) },
+          cats: { ...CATS_DEFAULT, ...(p.cats ?? {}) },
+          memory: { unloadMinimizedMin: 0, freeHiddenMin: 0, ...(p.memory ?? {}) },
+          people: { ...REL_DEFAULT, ...(p.people ?? {}) },
           privacy: { ...PRIVACY_DEFAULT, ...(p.privacy ?? {}), streamer: { ...PRIVACY_DEFAULT.streamer, ...(p.privacy?.streamer ?? {}) } },
           bridges: {
             discord: { ...BRIDGE_DEFAULT("discord"), ...(p.bridges?.discord ?? {}) },
@@ -867,3 +1022,4 @@ export const desk = () => useDesk.getState();
 
 // The relay needs to know where Python is, when it was set in Connections → Web.
 pythonFrom(() => useDesk.getState().net.python);
+noticesFrom((text) => useDesk.getState().say(text));

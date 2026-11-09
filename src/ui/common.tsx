@@ -6,6 +6,7 @@ import { initials, type Character } from "../lib/characters.ts";
 import { allowed, FEATURES, type Feature } from "../lib/privacy.ts";
 import { desk, useDesk } from "../lib/store.ts";
 import { speech } from "../lib/voice.ts";
+import { copyText } from "../lib/clipboard.ts";
 
 /**
  * Markdown with the notes extras: [[links]] open notes, #tags filter them, math is drawn, code gets a
@@ -56,7 +57,8 @@ export function Markdown({ text, className = "", from, onTask }: { text: string;
         const copy = t.closest(".code-copy");
         if (copy) {
           const code = copy.parentElement?.querySelector("code")?.textContent ?? "";
-          void navigator.clipboard?.writeText(code).then(() => {
+          void copyText(code).then((ok) => {
+            if (!ok) return;
             copy.textContent = "Copied";
             setTimeout(() => (copy.textContent = "Copy"), 1200);
           });
@@ -101,8 +103,34 @@ export function useSpeech() {
   return useSyncExternalStore(speech.subscribe, speech.get, speech.get);
 }
 
-export function Sensitive({ label = "Sensitive" }: { label?: string }) {
-  return <span className="tag-sensitive">{label}</span>;
+/** The Sensitive tag. Clicking it opens Settings → Privacy at the feature it's about (or at the top, for things
+ *  that aren't a Privacy feature); `plain` where it's already on the Privacy page. */
+export function Sensitive({ label = "Sensitive", feature, plain }: { label?: string; feature?: Feature; plain?: boolean }) {
+  if (plain) return <span className="tag-sensitive">{label}</span>;
+  const what = feature ? FEATURES.find((x) => x.id === feature)?.label : "";
+  return (
+    <button
+      type="button"
+      className="tag-sensitive link"
+      title={what ? `Privacy: ${what}` : "Privacy settings"}
+      onClick={(e) => {
+        e.stopPropagation();
+        openPrivacyAt(feature);
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+/** Settings → Privacy, brought forward, scrolled to one feature and lit for a moment. */
+export function openPrivacyAt(feature?: Feature) {
+  sessionStorage.setItem("pdd-settings-section", "privacy");
+  if (feature) sessionStorage.setItem("pdd-privacy-focus", feature);
+  else sessionStorage.removeItem("pdd-privacy-focus");
+  desk().openApp("settings");
+  window.dispatchEvent(new CustomEvent("pdd-settings", { detail: "privacy" }));
+  window.dispatchEvent(new CustomEvent("pdd-privacy-focus"));
 }
 
 /** Asks for informed consent before a feature that could share something. */

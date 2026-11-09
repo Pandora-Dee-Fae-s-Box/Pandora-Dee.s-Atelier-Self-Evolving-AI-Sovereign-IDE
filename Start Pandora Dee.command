@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pandora Dee Desktop on a Mac (or Linux): double-click in Finder, or run ./"Start Pandora Dee.command"
+# PDA SEASIDE on a Mac (or Linux): double-click in Finder, or run ./"Start Pandora Dee.command"
 cd "$(dirname "$0")" || exit 1
 if ! command -v node >/dev/null 2>&1; then
   echo "Node.js is needed. Install it from https://nodejs.org (or: brew install node) and run this again."

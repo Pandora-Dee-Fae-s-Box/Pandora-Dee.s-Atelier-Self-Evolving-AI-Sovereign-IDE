@@ -1,5 +1,5 @@
 #!/bin/bash
-# Sets up (or updates) Pandora Dee Desktop's Mac engines in one go, with nothing to type but one line:
+# Sets up (or updates) PDA SEASIDE's Mac engines in one go, with nothing to type but one line:
 #
 #   curl -sL <the desktop's address>/mac | bash             songs (the music bridge) and MLX Audio's server
 #   curl -sL <the desktop's address>/mac | bash -s voices   the same, plus what Kokoro's voices need (misaki)

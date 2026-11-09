@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { askText } from "../ui/Ask.tsx";
 import { desk, useDesk } from "../lib/store.ts";
 import { FLOOD_RULES, type Role } from "../lib/flood.ts";
 import { allowed } from "../lib/privacy.ts";
@@ -8,7 +9,7 @@ import { RiskDialog, Seg, Sensitive } from "../ui/common.tsx";
 import type { Source } from "../lib/room.ts";
 
 const ROLES: { id: Role; label: string }[] = [
-  { id: "keyholder", label: "Keyholder" },
+  { id: "keyholder", label: "Full access" },
   { id: "resident", label: "Residents" },
   { id: "general", label: "Everyone else" },
 ];
@@ -30,7 +31,7 @@ export function SentryApp() {
       <h2>Flood gate</h2>
       <p className="lead small">
         Paces what reaches the characters so their effort (and your tokens) isn't spent answering everything at once. A burst of messages, the same message again and again, or one
-        huge paste (often just someone sharing enthusiastically) shuts the gate: the characters rest, and only the keyholder can wake them until the keyholder reopens it.
+        huge paste (often just someone sharing enthusiastically) shuts the gate: the characters rest, and only accounts with full access can wake them, until one of them reopens it.
       </p>
       <div className="row" style={{ marginBottom: 10 }}>
         {s.flood.shut ? <span className="pill bad">Shut</span> : s.flood.armed ? <span className="pill good">On guard</span> : <span className="pill warn">Off</span>}
@@ -45,7 +46,7 @@ export function SentryApp() {
       <label className="check">
         <input type="checkbox" checked={s.flood.armed} disabled={!keyholder} onChange={(e) => desk().set({ flood: { ...s.flood, armed: e.target.checked } })} />
         <span>
-          Watch for floods (recommended). It shuts on {FLOOD_RULES.join("; ")}.{!keyholder ? " Only the keyholder can change this." : ""}
+          Watch for floods (recommended). It shuts on {FLOOD_RULES.join("; ")}.{!keyholder ? " Only accounts with full access can change this." : ""}
         </span>
       </label>
       <h4 style={{ marginTop: 16 }}>Who can wake the characters</h4>
@@ -100,7 +101,7 @@ export function SentryApp() {
 
       <div className="divider" />
       <h2>
-        Device watch <Sensitive />
+        Device watch <Sensitive feature="sensors" />
       </h2>
       <p className="lead small">Jade can keep watch on this computer: battery, network, and whether someone is using the desktop. Off unless you turn it on. Nothing leaves the computer; notes go to Jade's journal/sentry.md.</p>
       {!sensorsOk ? (
@@ -140,10 +141,11 @@ export function SentryApp() {
               ["battery", "Battery and charger"],
               ["network", "Network going up or down"],
               ["screen", "Someone leaving or returning to the desktop"],
+              ["lan", "A new device on the local network, or one that starts sharing folders (looked at every 5 minutes from the desktop's own computer)"],
             ] as const
           ).map(([k, label]) => (
             <label key={k} className="check">
-              <input type="checkbox" checked={s.sensors[k]} onChange={(e) => desk().set({ sensors: { ...s.sensors, [k]: e.target.checked } })} />
+              <input type="checkbox" checked={Boolean(s.sensors[k])} onChange={(e) => desk().set({ sensors: { ...s.sensors, [k]: e.target.checked } })} />
               <span>{label}</span>
             </label>
           ))}
@@ -152,6 +154,7 @@ export function SentryApp() {
             <span>Mention it in the Room when Jade is there</span>
           </label>
           <p className="small faint">Calls, texts, location, camera and microphone are phone features and aren't watched here.</p>
+          <NetworkDevices />
         </>
       )}
 
@@ -162,5 +165,64 @@ export function SentryApp() {
       </div>
       {risk ? <RiskDialog feature="sensors" onClose={() => setRisk(false)} /> : null}
     </div>
+  );
+}
+
+type LanDevice = { mac: string; ip: string; name: string; label: string; sharing: boolean; first: number; last: number };
+
+/** The devices on the local network, as this computer last saw them (shown on the desktop's own computer only). */
+function NetworkDevices() {
+  const [list, setList] = useState<{ at: number; devices: LanDevice[] } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    void fetch("/api/lan").then((r) => (r.ok ? r.json().then(setList) : null), () => null);
+  }, []);
+  if (!list) return null;
+  const look = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      const r = await fetch("/api/lan/scan", { method: "POST" });
+      if (!r.ok) throw new Error(((await r.json().catch(() => ({}))) as { error?: string }).error || `It answered ${r.status}.`);
+      setList(await r.json());
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const name = async (d: LanDevice) => {
+    const label = await askText("What is it?", d.label || d.name, { body: `${d.ip} · ${d.mac}`, placeholder: "Kai's tablet", yes: "Save" });
+    if (label === null) return;
+    const r = await fetch("/api/lan/label", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mac: d.mac, label }) });
+    if (r.ok) setList(await r.json());
+  };
+  return (
+    <>
+      <div className="divider" />
+      <div className="row" style={{ gap: 8, alignItems: "center" }}>
+        <h4 style={{ margin: 0 }}>On the local network</h4>
+        <span className="grow" />
+        <span className="small faint">{list.at ? `looked ${new Date(list.at).toLocaleTimeString()}` : "not looked yet"}</span>
+        <button className="btn small" disabled={busy} onClick={() => void look()}>
+          {busy ? "Looking…" : "Look now"}
+        </button>
+      </div>
+      {err ? <p className="small bad-text">{err}</p> : null}
+      <p className="small faint">From this computer's own list of devices it has heard from; each is only asked whether it shares folders. Click one to name it.</p>
+      <table className="small" style={{ width: "100%", borderCollapse: "collapse" }}>
+        <tbody>
+          {list.devices.map((d) => (
+            <tr key={d.mac} onClick={() => void name(d)} style={{ cursor: "pointer" }} title="Name it">
+              <td>{d.label || d.name || <span className="faint">unnamed</span>}</td>
+              <td className="mono faint">{d.ip}</td>
+              <td>{d.sharing ? "shares folders" : ""}</td>
+              <td className="faint">{new Date(d.last).toLocaleDateString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
   );
 }

@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
+import { execFile } from "node:child_process";
 
 /** "/f/Music" (how Git Bash writes F:\Music) → "F:\Music" on Windows. */
 export function fromMsys(p) {
@@ -17,8 +18,20 @@ export function fromMsys(p) {
  * Folders inside a folder, for picking music folders from the desktop page (names only, no files). With no
  * path: the drives (Windows) or the usual places (Mac, Linux).
  */
-export async function listFolders(where) {
+export async function listFolders(where, placesFile, { newPlaces = true } = {}) {
   const home = process.env.USERPROFILE || process.env.HOME || "/";
+  const share = netShare(String(where || ""));
+  // Opening a network address makes this computer connect (and sign in) to it, so a new one is only reached from the
+  // computer itself; other devices browse the places already opened here and the mapped drives.
+  if (share && !newPlaces) {
+    if (!(await knownPlace(where, placesFile))) throw new Error("A new network place is opened from the desktop's own computer first; then it's here for every device.");
+  }
+  if (share?.host && !share.share) {
+    // a computer on the network: its shared folders (Windows' own `net view`; some networks don't answer it)
+    const shares = await netView(share.host);
+    if (!shares.length) throw new Error(`Couldn't see what \\\\${share.host} shares. Type the share's address too, like \\\\${share.host}\\media.`);
+    return { path: `\\\\${share.host}`, parent: "", folders: shares.map((n) => ({ path: `\\\\${share.host}\\${n}`, name: n })), audio: 0 };
+  }
   if (!where) {
     // each place is checked at the same time, and a disconnected network drive gets 1.5 s before it's left out
     const isDir = (p) =>
@@ -27,10 +40,21 @@ export async function listFolders(where) {
     if (process.platform === "win32") for (const l of "CDEFGHIJKLMNOPQRSTUVWXYZ") candidates.push([`${l}:\\`, `${l}:`]);
     else candidates.push(["/Volumes", "Volumes"], ["/media", "media"], ["/mnt", "mnt"], ["/", "/"]);
     const ok = await Promise.all(candidates.map(([p]) => isDir(p)));
-    return { path: "", parent: null, folders: candidates.filter((_, i) => ok[i]).map(([p, name]) => ({ path: p, name })), audio: 0 };
+    // a drive that's a network share says which (M: · \\ALICEMOVIES\1 Alice), and network places opened before come after
+    const mapped = await netUse();
+    const places = readPlaces(placesFile).filter((p) => !Object.values(mapped).some((r) => r.toLowerCase() === p.toLowerCase()));
+    const folders = candidates.filter((_, i) => ok[i]).map(([p, name]) => ({ path: p, name: mapped[name] ? `${name} · ${mapped[name]}` : name }));
+    return { path: "", parent: null, folders: [...folders, ...places.map((p) => ({ path: p, name: p }))], audio: 0 };
   }
   const dir = path.resolve(fromMsys(String(where)));
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    if (share) throw new Error(`Couldn't open ${dir}. If it asks for a sign-in, open it once in Windows' File Explorer (Windows remembers it), then try again.`);
+    throw e;
+  }
+  if (share?.share) rememberPlace(placesFile, `\\\\${share.host}\\${share.share}`);
   const folders = [];
   let audio = 0;
   for (const e of entries) {
@@ -48,7 +72,69 @@ export async function listFolders(where) {
   }
   folders.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
   const up = path.dirname(dir);
-  return { path: dir, parent: up === dir ? "" : up, folders, audio };
+  // (a share's top goes up to its computer's list of shares)
+  return { path: dir, parent: up === dir ? (share ? `\\\\${share.host}` : "") : up, folders, audio };
+}
+
+/** Whether a folder is a network place this computer has already opened (or a mapped drive's), or not on the network. */
+export async function knownPlace(folder, placesFile) {
+  const s = netShare(String(folder));
+  if (!s) return true;
+  const known = [...readPlaces(placesFile), ...Object.values(await netUse())].map((p) => p.toLowerCase());
+  return Boolean(s.share) && known.includes(`\\\\${s.host}\\${s.share}`.toLowerCase());
+}
+
+/** "\\host", "\\host\share" or a path inside a share → its host and share; anything else → null. */
+export function netShare(p) {
+  const m = /^\\\\([^\\/]+)(?:\\([^\\/]+))?/.exec(p.replace(/\//g, "\\"));
+  return m ? { host: m[1], share: m[2] || "" } : null;
+}
+
+const run = (cmd, args) =>
+  new Promise((ok) => execFile(cmd, args, { windowsHide: true, timeout: 8000 }, (_e, out) => ok(String(out || ""))));
+
+/** Windows' mapped network drives: { "M:": "\\host\share" }. */
+export async function netUse() {
+  if (process.platform !== "win32") return {};
+  const out = {};
+  for (const line of (await run("net", ["use"])).split(/\r?\n/)) {
+    // (a drive Windows can't reach right now, "Unavailable" or "Disconnected", is left out)
+    const m = /^(\S*)\s+([A-Z]:)\s+(\\\\\S.*?)\s{2,}/.exec(line);
+    if (m && !/^(Unavailable|Disconnected)$/i.test(m[1])) out[m[2]] = m[3].trim();
+  }
+  return out;
+}
+
+/** The disk shares a computer on the network offers (empty when it doesn't answer). */
+export async function netView(host) {
+  if (process.platform !== "win32" || !/^[\w.-]+$/.test(host)) return [];
+  return parseNetView(await run("net", ["view", `\\\\${host}`]));
+}
+export function parseNetView(out) {
+  const shares = [];
+  for (const line of out.split(/\r?\n/)) {
+    const cols = line.split(/\s{2,}/);
+    if (cols.length >= 2 && /^Disk$/i.test(cols[1].trim()) && cols[0].trim()) shares.push(cols[0].trim());
+  }
+  return shares;
+}
+
+export function readPlaces(file) {
+  try {
+    return file ? JSON.parse(fs.readFileSync(file, "utf8")).filter((p) => typeof p === "string") : [];
+  } catch {
+    return [];
+  }
+}
+export function rememberPlace(file, place) {
+  if (!file) return;
+  const now = readPlaces(file);
+  if (now.some((p) => p.toLowerCase() === place.toLowerCase())) return;
+  try {
+    fs.writeFileSync(file, JSON.stringify([...now, place], null, 2));
+  } catch {
+    /* only a convenience */
+  }
 }
 
 const AUDIO = /\.(mp3|m4a|m4b|aac|flac|ogg|oga|opus|wav|wma|webm|mka|aiff?|caf|alac)$/i;
@@ -166,7 +252,8 @@ export function createMusic(dataDir) {
     return { tracks: Object.keys(index.tracks).length, read, failed, folders: index.folders, walked, unreadable: unreadable.slice(0, 5) };
   }
 
-  const list = () => ({ folders: index.folders, own: ownDir, tracks: Object.values(index.tracks).map(({ path: _p, mtime: _m, ...t }) => t) });
+  // (the file's own name goes along, for saying which file when one won't play; its full path stays here)
+  const list = () => ({ folders: index.folders, own: ownDir, tracks: Object.values(index.tracks).map(({ path: p, mtime: _m, ...t }) => ({ ...t, file: path.basename(p), rel: path.relative(t.folder, p) })) });
 
   /** Stream a track, with byte ranges so seeking works. */
   function serve(req, res, id) {
@@ -284,5 +371,29 @@ export function createMusic(dataDir) {
     return { ...rest, ...format, size: st?.size ?? t.size, modified: st?.mtimeMs ?? t.mtime, exists: Boolean(st), own: path.dirname(t.path) === ownDir || t.path.startsWith(ownDir + path.sep) };
   }
 
-  return { scan, list, serve, cover, radio, upload, info, folders: () => index.folders };
+  /** A song's file renamed in its folder (its kind kept: .mp3 stays .mp3). Its id follows its path, so the new id comes
+   *  back for playlists to follow. From another device only songs added here (the data folder's music/) can be. */
+  function rename(id, name, { local = false } = {}) {
+    const t = index.tracks[id];
+    if (!t) throw Object.assign(new Error("That song isn't in the library any more."), { status: 404 });
+    const own = t.path.startsWith(ownDir + path.sep);
+    if (!local && !own) throw Object.assign(new Error("Songs in your music folders are renamed on the desktop's own computer; songs added from a device can be renamed from anywhere."), { status: 403 });
+    const ext = path.extname(t.path);
+    let stem = String(name ?? "").replace(/[\\/:*?"<>|\x00-\x1f]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 150);
+    if (stem.toLowerCase().endsWith(ext.toLowerCase())) stem = stem.slice(0, -ext.length).trim();
+    if (!stem || stem.startsWith(".")) throw Object.assign(new Error("What should it be called?"), { status: 400 });
+    const target = path.join(path.dirname(t.path), stem + ext);
+    if (target === t.path) return { id, file: path.basename(target) };
+    if (target.toLowerCase() !== t.path.toLowerCase() && fs.existsSync(target)) throw Object.assign(new Error("Another song there already has that name."), { status: 409 });
+    fs.renameSync(t.path, target);
+    const old = path.basename(t.path, ext);
+    const nid = idOf(target);
+    delete index.tracks[id];
+    // (the title follows when it was only ever the file's name)
+    index.tracks[nid] = { ...t, id: nid, path: target, title: t.title === old ? stem : t.title };
+    save();
+    return { id: nid, file: path.basename(target) };
+  }
+
+  return { scan, list, serve, cover, radio, upload, info, rename, folders: () => index.folders };
 }

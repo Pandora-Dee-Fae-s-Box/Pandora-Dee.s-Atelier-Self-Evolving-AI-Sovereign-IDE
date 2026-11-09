@@ -8,6 +8,9 @@ import { pageToMarkdown } from "../lib/jadeCore.ts";
 import { renderMarkdown } from "../lib/markdown.ts";
 import { openMenu } from "../ui/ContextMenu.tsx";
 import type { BrowserPrefs, BrowserTab } from "../lib/browserPrefs.ts";
+import { copyText } from "../lib/clipboard.ts";
+import { askText } from "../ui/Ask.tsx";
+import { FullBrowser } from "./FullBrowser.tsx";
 
 /**
  * A tabbed browser. Pages come through the desktop (most sites refuse to be framed directly) into a sandboxed
@@ -47,7 +50,16 @@ export function browse(url: string, newTab = true) {
   desk().openApp("browser");
 }
 
+/** The Browser window: the full browser (a real engine on the desktop) by default, or the private Reader. */
 export function BrowserApp() {
+  const mode = useDesk((s) => s.browser.mode ?? "full");
+  const home = useDesk((s) => s.browser.home);
+  if (mode === "full") return <FullBrowser home={home} onReader={() => setPrefs({ mode: "reader" })} />;
+  return <ReaderBrowser />;
+}
+
+/** The private Reader: pages fetched by the desktop into a sandbox that keeps nothing (server/browse.mjs). */
+function ReaderBrowser() {
   const b = useDesk((s) => s.browser);
   const [key, setKey] = useState("");
   useEffect(() => void browseKey().then(setKey, () => setKey("")), []);
@@ -101,7 +113,7 @@ export function BrowserApp() {
   const more = (e: React.MouseEvent) =>
     openMenu(e, [
       { label: "Open in your browser", run: () => void window.open(url, "_blank", "noopener") },
-      { label: "Copy the address", run: () => void navigator.clipboard?.writeText(url) },
+      { label: "Copy the address", run: () => void copyText(url) },
       { label: "Share with the room", run: () => void import("../lib/agent.ts").then((a) => a.say(`${title ? `${title}: ` : ""}${url}`)) },
       { sep: true },
       { label: "Make this the start page", run: () => setPrefs({ home: url }) },
@@ -166,6 +178,9 @@ export function BrowserApp() {
         <button type="button" className="icon-btn" aria-label="More" onClick={more}>
           <MoreHorizontal size={15} />
         </button>
+        <button type="button" className="btn small" data-tip="The full browser: a real engine on the desktop that keeps sites' logins" onClick={() => setPrefs({ mode: "full" })}>
+          Full browser
+        </button>
       </form>
       {b.bar && b.bookmarks.length ? (
         <div className="browser-marks">
@@ -180,7 +195,7 @@ export function BrowserApp() {
                 openMenu(e, [
                   { label: "Open", run: () => go(m.url) },
                   { label: "Open in a new tab", run: () => add(m.url) },
-                  { label: "Rename…", run: () => { const t = prompt("Bookmark name", m.title); if (t) setPrefs({ bookmarks: prefs().bookmarks.map((x) => (x.url === m.url ? { ...x, title: t } : x)) }); } },
+                  { label: "Rename…", run: async () => { const t = await askText("Bookmark name", m.title); if (t) setPrefs({ bookmarks: prefs().bookmarks.map((x) => (x.url === m.url ? { ...x, title: t } : x)) }); } },
                   { label: "Remove", danger: true, run: () => setPrefs({ bookmarks: prefs().bookmarks.filter((x) => x.url !== m.url) }) },
                 ])
               }

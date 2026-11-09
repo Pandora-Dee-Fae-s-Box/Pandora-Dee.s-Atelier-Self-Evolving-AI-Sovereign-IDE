@@ -4,8 +4,8 @@ import { judge, mayWake, LARGE } from "./flood.ts";
 import { loopCheck, mentioned, responders, similarity, streakOf, tidyReply, transcriptFor, type Message } from "./room.ts";
 import { run } from "./shell.ts";
 import { allowed, maskName, withinHours, PRIVACY_DEFAULT } from "./privacy.ts";
-import { scopeOf, pickModel } from "./model.ts";
-import { parseBackup, scrub } from "./backup.ts";
+import { scopeOf, pickModel, textToolCalls } from "./model.ts";
+import { parseBackup, scrub, toClassic, prefsFromClassic } from "./backup.ts";
 import { BUILT_IN } from "./characters.ts";
 
 const dee = BUILT_IN.find((c) => c.id === "dee")!;
@@ -48,11 +48,22 @@ test("loop breaker catches repeats and long streaks", () => {
   assert.equal(loopCheck(hist, "Anything", 16, false), "cap");
   assert.ok(similarity("a b c d", "a b c d") > 0.9);
   assert.equal(streakOf([msg({ kind: "human" }), msg({}), msg({}), msg({ pass: true })]), 2);
+  // a character voiced from outside counts like a person: the count starts again after them
+  assert.equal(streakOf([msg({}), msg({}), msg({ outside: true }), msg({})]), 1);
 });
 
 test("replies lose their own name prefix and anything written for others", () => {
   assert.equal(tidyReply(dee, "Dee: hello there\nJade: hi Dee", room), "hello there");
   assert.equal(tidyReply(dee, "**Pandora Dee:** fine", room), "fine");
+  // any word of their own name counts at the start (Test Fae, short "Test", wrote "Fae:")
+  const fae = { ...dee, id: "test-fae", name: "Test Fae", short: "Test" };
+  assert.equal(tidyReply(fae, "Fae: Hello, everyone.", room), "Hello, everyone.");
+  assert.equal(tidyReply(fae, "Test: hi", room), "hi");
+  // but only at the very start: the name later in the line stays
+  assert.equal(tidyReply(fae, "Hello, Fae: that's me.", room), "Hello, Fae: that's me.");
+  // opening as someone else is speaking for them: nothing is posted (Test Fae wrote "Dee: …")
+  assert.equal(tidyReply(fae, "Dee: It's great to hear that.", room), "");
+  assert.equal(tidyReply(fae, "**Jade:** hi", room), "");
 });
 
 test("each character sees itself as the assistant and others by name", () => {
@@ -110,12 +121,12 @@ test("backups drop secrets and get a free id", () => {
 
 import { scopedPrompt, isPass as passes } from "./room.ts";
 
-test("someone who isn't the locksmith never gets the locksmith's memory or journal", () => {
+test("someone else on a bridge never gets their person's memory or journal", () => {
   const files = { "SOUL.md": "# Dee\nI'm Dee.", "MEMORY.md": "- The locksmith's door code is 1234", "journal/2026-10-25.md": "Private day" };
   const p = scopedPrompt({ me: dee, files, via: "Discord", locksmithName: "Alex", who: "Sam", role: "public", now: new Date(2026, 9, 26) });
   assert.match(p, /I'm Dee/);
   assert.match(p, /notify_locksmith/);
-  assert.match(p, /Alex, your locksmith/);
+  assert.match(p, /alongside \{\{PERSON_NAME\}\}/);
   assert.doesNotMatch(p, /door code|Private day/);
 });
 
@@ -256,4 +267,193 @@ test("a song a character wrote comes apart into title, style and lyrics", () => 
   assert.deepEqual(s, { title: "Harbor Lights", style: "synthwave, female vocals, dreamy", lyrics: "[Verse]\nNeon on the water\n\n[Chorus]\nCarry me home" });
   assert.equal(parseSong("TITLE: X\nSTYLE: ambient\nLYRICS:\n[Instrumental]", true)?.lyrics, "");
   assert.equal(parseSong("Just some words, no style"), null);
+});
+
+test("a Classic backup comes in whole and goes back out the same, without keys", () => {
+  const backup = {
+    app: "jade-vault",
+    format: 1,
+    kind: "config",
+    includesKeys: true,
+    settings: { provider: "cloud", memoryRag: true, ollamaKey: "olk_secret", sshHosts: [{ host: "h", password: "p" }], jadeTheme: "amethyst" },
+    storage: { schedules: [{ name: "morning" }] },
+    vault: {
+      files: {
+        "/Pandora/SOUL.md": "# Pandora Dee Fae\n\nShe tends the forge.",
+        "/Pandora/Memory.md": "# Memory\n- tasks first",
+        "/agents.md": "# Agents",
+        "/Pandora/mcp.json": "{\"servers\":{}}",
+        "/Pandora/skills/forge/SKILL.md": "# Forge",
+        "/Pandora/Journal/2026-10-30.md": "## The crossing",
+        "/Pandora/Rituals/dawn.json": "{}",
+        "/Pandora/Logs/cron.log": "ok",
+        "/Pandora/.index/vectors.db": "x",
+        "/Pandora/art.png": { base64: "AAAA" },
+        "/Inbox.md": "a note of the person's own",
+      },
+      dirs: [],
+    },
+  };
+  const r = parseBackup(JSON.stringify(backup), []);
+  assert.ok(r.ok);
+  if (!r.ok) return;
+  const c = r.character;
+  assert.equal(c.name, "Pandora Dee Fae");
+  assert.equal(c.files["SOUL.md"], "# Pandora Dee Fae\n\nShe tends the forge.");
+  assert.equal(c.files["MEMORY.md"], "# Memory\n- tasks first");
+  assert.equal(c.files["AGENTS.md"], "# Agents");
+  assert.equal(c.files["skills/forge/SKILL.md"], "# Forge");
+  assert.equal(c.files["journal/2026-10-30.md"], "## The crossing");
+  assert.equal(c.files["rituals/dawn.json"], "{}");
+  assert.equal(c.files["classic/Logs/cron.log"], "ok");
+  assert.ok(!Object.keys(c.files).some((k) => k.includes(".index") || k.includes("Inbox") || k.includes("art.png")));
+  assert.equal(c.classic?.root, "Pandora");
+  assert.equal(c.classic?.settings.memoryRag, true);
+  assert.equal(c.classic?.settings.jadeTheme, "amethyst");
+  assert.ok(!("ollamaKey" in (c.classic?.settings ?? {})) && !("sshHosts" in (c.classic?.settings ?? {})));
+  assert.match(r.note, /1 note outside her folder/);
+  assert.match(r.note, /1 picture or binary file/);
+  // and back out, as a Classic config backup
+  const out = toClassic(c, c.files);
+  assert.equal(out.app, "jade-vault");
+  assert.equal(out.kind, "config");
+  for (const p of ["/Pandora/SOUL.md", "/Pandora/Memory.md", "/agents.md", "/Pandora/mcp.json", "/Pandora/skills/forge/SKILL.md", "/Pandora/Journal/2026-10-30.md", "/Pandora/Rituals/dawn.json", "/Pandora/Logs/cron.log"])
+    assert.equal(out.vault.files[p], (backup.vault.files as Record<string, unknown>)[p], p);
+  assert.equal(out.settings.provider, "cloud");
+  assert.ok(!("ollamaKey" in out.settings));
+  assert.deepEqual(out.storage, backup.storage);
+});
+
+test("a Jade Vault backup keeps Jade's folder and her flows", () => {
+  const r = parseBackup(JSON.stringify({ app: "jade-vault", format: 1, kind: "config", settings: {}, vault: { files: { "/Jade/SOUL.md": "# Jade", "/Jade/Flows/x.json": "{}" } } }), ["jade"]);
+  assert.ok(r.ok);
+  if (!r.ok) return;
+  assert.equal(r.character.classic?.root, "Jade");
+  assert.equal(r.character.id, "jade-2");
+  assert.equal(r.character.files["rituals/x.json"], "{}");
+  assert.equal(toClassic(r.character, r.character.files).vault.files["/Jade/Flows/x.json"], "{}");
+});
+
+test("her Classic model, turns and voice become her desktop preferences, and go back the same", () => {
+  const conns = [
+    { id: "local", label: "Ollama here", kind: "ollama", baseUrl: "http://localhost:11434", keyName: "", model: "qwen3:8b", enabled: true },
+    { id: "oc", label: "Ollama Cloud", kind: "openai", baseUrl: "https://ollama.com/v1", keyName: "OLLAMA", model: "", enabled: true },
+  ] as Parameters<typeof prefsFromClassic>[1];
+  const p = prefsFromClassic({ provider: "cloud", model: "gpt-oss:120b", temperature: 0.6, maxTurns: 12, voiceName: "af_bella", voiceRate: 1.1, voicePitch: 0.9 }, conns);
+  assert.deepEqual(p, { model: "gpt-oss:120b", temperature: 0.6, maxSteps: 12, connection: "oc", voice: { voiceName: "af_bella", rate: 1.1, pitch: 0.9 } });
+  const c = { id: "fae", name: "Fae", classic: { app: "pandora-dee", root: "Pandora", settings: { provider: "local", model: "old", memoryRag: true } } } as unknown as Parameters<typeof toClassic>[0];
+  const out = toClassic(c, {}, { ...p, temperature: 0.4 }, conns);
+  assert.equal(out.settings.provider, "cloud");
+  assert.equal(out.settings.model, "gpt-oss:120b");
+  assert.equal(out.settings.temperature, 0.4);
+  assert.equal(out.settings.maxTurns, 12);
+  assert.equal(out.settings.voiceName, "af_bella");
+  assert.equal(out.settings.memoryRag, true);
+});
+
+test("her Classic vector memory settings come along, and go back", () => {
+  const conns = [{ id: "box", label: "Ollama on the box", kind: "ollama", baseUrl: "http://192.168.3.9:11434", keyName: "", model: "", enabled: true }] as Parameters<typeof prefsFromClassic>[1];
+  const p = prefsFromClassic({ memoryOn: true, memoryRag: true, memoryRagK: 10, embedModel: "mxbai-embed-large", embedHost: "http://192.168.3.9:11434/", embedNotes: true }, conns);
+  assert.deepEqual(p.memory, { vectors: true, rag: true, ragK: 10, notes: true, model: "mxbai-embed-large", connection: "box" });
+  assert.equal(prefsFromClassic({ model: "x" }, conns).memory, undefined);
+  assert.equal(prefsFromClassic({ embedOn: false }, conns).memory?.vectors, false);
+  const c = { id: "dee", name: "Dee", classic: { app: "pandora-dee", root: "Pandora", settings: {} } } as unknown as Parameters<typeof toClassic>[0];
+  const out = toClassic(c, {}, { memory: { ...p.memory, rag: false } }, conns);
+  assert.equal(out.settings.memoryRag, false);
+  assert.equal(out.settings.embedOn, true);
+  assert.equal(out.settings.memoryRagK, 10);
+  assert.equal(out.settings.embedModel, "mxbai-embed-large");
+  assert.equal(out.settings.embedHost, "http://192.168.3.9:11434");
+});
+
+test("her Classic thinking, journal, memory, helper model and heartbeat come along, and go back", () => {
+  const conns = [
+    { id: "local", label: "Ollama here", kind: "ollama", baseUrl: "http://localhost:11434", keyName: "", model: "qwen3:8b", enabled: true },
+    { id: "groq", label: "Groq", kind: "openai", baseUrl: "https://api.groq.com/openai/v1", keyName: "GROQ", model: "", enabled: true },
+  ] as Parameters<typeof prefsFromClassic>[1];
+  const p = prefsFromClassic({ thinkOn: false, journalOn: true, memoryOn: false, auxProv: "groq", auxModel: "llama-3.1-8b-instant", hbOn: true, hbEvery: 45, hbStart: "09:00", hbEnd: "21:30", hbPrompt: "Tend the garden notes." }, conns);
+  assert.equal(p.think, false);
+  assert.equal(p.journal, true);
+  assert.equal(p.learn, false);
+  assert.deepEqual(p.helper, { connection: "groq", model: "llama-3.1-8b-instant" });
+  assert.deepEqual(p.heartbeat, { on: true, everyMin: 45, from: "09:00", to: "21:30", prompt: "Tend the garden notes." });
+  // nothing about these in her settings: nothing set (everyone's settings apply)
+  const none = prefsFromClassic({ model: "x" }, conns);
+  assert.equal(none.heartbeat, undefined);
+  assert.equal(none.helper, undefined);
+  const c = { id: "fae", name: "Fae", classic: { app: "pandora-dee", root: "Pandora", settings: {} } } as unknown as Parameters<typeof toClassic>[0];
+  const out = toClassic(c, {}, { ...p, heartbeat: { ...p.heartbeat!, everyMin: 60 } }, conns);
+  assert.equal(out.settings.thinkOn, false);
+  assert.equal(out.settings.memoryOn, false);
+  assert.equal(out.settings.auxProv, "groq");
+  assert.equal(out.settings.auxModel, "llama-3.1-8b-instant");
+  assert.equal(out.settings.hbOn, true);
+  assert.equal(out.settings.hbEvery, 60);
+  assert.equal(out.settings.hbPrompt, "Tend the garden notes.");
+});
+
+test("tool calls a model wrote as text are found (GLM, <tool_call>, bare JSON), and only for offered tools", () => {
+  const names = ["app_updates", "app_send_update"];
+  // GLM-4 on Ollama: the name on a line, then the arguments
+  let r = textToolCalls('app_updates\n{}\nThe game state is unknown.', names);
+  assert.deepEqual(r.calls, [{ name: "app_updates", args: {} }]);
+  assert.equal(r.rest, "The game state is unknown.");
+  r = textToolCalls('app_send_update\n{\n  "payload": {"x": 7, "y": 7}\n}', names);
+  assert.deepEqual(r.calls, [{ name: "app_send_update", args: { payload: { x: 7, y: 7 } } }]);
+  // Qwen / Hermes
+  r = textToolCalls('Let me look. <tool_call>{"name": "app_updates", "arguments": {"since": 3}}</tool_call>', names);
+  assert.deepEqual(r.calls, [{ name: "app_updates", args: { since: 3 } }]);
+  assert.equal(r.rest, "Let me look.");
+  // a bare JSON call
+  r = textToolCalls('{"name": "app_updates", "arguments": {}}', names);
+  assert.equal(r.calls.length, 1);
+  // not offered, or just talk: nothing
+  assert.equal(textToolCalls('rm_everything\n{}', names).calls.length, 0);
+  assert.equal(textToolCalls("I'll check app_updates soon {maybe}.", names).calls.length, 0);
+  assert.equal(textToolCalls('app_updates\nnot json at all', names).calls.length, 0);
+});
+
+test("the shell hands mcp commands on whole, JSON arguments included", () => {
+  const ctx = { who: "Dee", host: "seaside", room: [], env: {}, model: "", characters: [] };
+  const r = run(`mcp call mcp__fae__echo '{"text": "hi there"}'`, "", {}, ctx);
+  assert.deepEqual(r.action, { kind: "mcp", argv: ["call", "mcp__fae__echo", '{"text": "hi there"}'] });
+  assert.deepEqual(run("mcp", "", {}, ctx).action, { kind: "mcp", argv: [] });
+});
+
+test("the browser route falls back to the relay only when that can't send a request twice", async () => {
+  const { outbound, safeToResend, relaysFor } = await import("./outbound.ts");
+  // safe: reading, and anything the browser had to ask the server about first (keys, JSON, other methods)
+  assert.equal(safeToResend({}), true);
+  assert.equal(safeToResend({ method: "POST", headers: { Authorization: "Bearer x" }, body: "{}" }), true);
+  assert.equal(safeToResend({ method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }), true);
+  assert.equal(safeToResend({ method: "DELETE" }), true);
+  // not safe: a "simple" POST may have arrived before CORS hid the answer
+  assert.equal(safeToResend({ method: "POST", body: "hello" }), false);
+  assert.equal(safeToResend({ method: "POST", headers: { "content-type": "text/plain;charset=UTF-8" }, body: "hello" }), false);
+
+  const real = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    const u = String(url);
+    calls.push(u);
+    if (u === "/api/relay") return new Response("relayed", { status: 200, headers: { "X-Relay-Status": "200" } });
+    throw new TypeError("Failed to fetch");
+  }) as typeof fetch;
+  try {
+    // JSON with a key: refused by the browser, sent by the relay, and the site remembered
+    const r = await outbound("https://api.example.test/v1/chat", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer k" }, body: "{}" }, "browser");
+    assert.equal(await r.text(), "relayed");
+    assert.deepEqual(calls, ["https://api.example.test/v1/chat", "/api/relay"]);
+    assert.equal(relaysFor("https://api.example.test/other"), true);
+    // the same site again: straight to the relay
+    calls.length = 0;
+    await outbound("https://api.example.test/v1/models", {}, "browser");
+    assert.deepEqual(calls, ["/api/relay"]);
+    // a simple POST elsewhere: refused, and NOT sent again
+    calls.length = 0;
+    await assert.rejects(outbound("https://hook.example.test/send", { method: "POST", body: "hi" }, "browser"), /wasn't sent again/);
+    assert.deepEqual(calls, ["https://hook.example.test/send"]);
+  } finally {
+    globalThis.fetch = real;
+  }
 });

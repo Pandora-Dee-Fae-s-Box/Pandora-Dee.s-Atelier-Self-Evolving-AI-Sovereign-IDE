@@ -1,13 +1,18 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { startHeartbeat } from "../lib/heartbeat.ts";
+import { startMemory, useUnloaded } from "../lib/memory.ts";
 import { Check, Download, GripVertical, LayoutGrid } from "lucide-react";
-import { APPS, desk, useDesk, type AppId } from "../lib/store.ts";
+import { APPS, desk, inToddler, useDesk, type AppId } from "../lib/store.ts";
+import { startToddler, ToddlerPill } from "./Toddler.tsx";
 import { Window } from "./Window.tsx";
 import { PersonAvatar } from "./common.tsx";
-import { download, makeBackup } from "../lib/backup.ts";
+import { download, makeBackup, toClassic } from "../lib/backup.ts";
 import { scopeOf } from "../lib/model.ts";
 import { allowed } from "../lib/privacy.ts";
 import { resumeBridges } from "../lib/bridges.ts";
-import { connectServer } from "../lib/connections.ts";
+import { connectServer, syncCharacterMcp } from "../lib/connections.ts";
+import { Cats } from "./Cats.tsx";
+import { startTravel } from "../lib/travel.ts";
 import { useSensors } from "./sensors.ts";
 import { LockScreen } from "./LockScreen.tsx";
 import { Boundary } from "./Boundary.tsx";
@@ -15,10 +20,19 @@ import { Classic } from "./Classic.tsx";
 import { Dock } from "./Dock.tsx";
 import { VolumeControl } from "./Volume.tsx";
 import { AskHost } from "./Ask.tsx";
+import { SharedIn } from "./SharedIn.tsx";
 import { TooltipHost } from "./Tooltip.tsx";
 import { startBackupSchedule } from "../lib/serverBackup.ts";
 import { applyInbound } from "../lib/inbound.ts";
 import { startChatSync } from "../lib/chats.ts";
+import { loadResidentKeys } from "../lib/residentKeys.ts";
+import { startHeart } from "../lib/heart.ts";
+import { startOwnTime } from "../lib/ownTime.ts";
+import { startBodies } from "../lib/bodies.ts";
+import { startTerminalSync } from "../lib/terminal.ts";
+import { doneAsking, shouldAsk, startDeskSync } from "../lib/deskSync.ts";
+import { askUser } from "./Ask.tsx";
+import { startPadsControl } from "../lib/padsControl.ts";
 import { loadNotes } from "../lib/notes.ts";
 import { ContextMenuHost, openMenu, openMenuAt, type MenuItem } from "./ContextMenu.tsx";
 import { formatClock, validLocale, validZone, type ClockPrefs } from "../lib/clock.ts";
@@ -30,6 +44,12 @@ import { CastApp } from "../apps/Cast.tsx";
 import { FilesApp } from "../apps/Files.tsx";
 import { NotesApp } from "../apps/Notes.tsx";
 import { MusicApp } from "../apps/Music.tsx";
+import { TheaterApp } from "../apps/Theater.tsx";
+import { PadsApp } from "../apps/Pads.tsx";
+import { LuantiApp } from "../apps/Luanti.tsx";
+import { startPads } from "../lib/pads.ts";
+import { startGestures } from "./gestures.ts";
+import { PadsMail } from "./PadsMail.tsx";
 import { Visualizer, VisualizerApp } from "../apps/Visualizer.tsx";
 import "../lib/musicTalk.ts";
 import { JournalApp } from "../apps/Journal.tsx";
@@ -45,7 +65,9 @@ import { canPrompt, install, installed } from "../lib/install.ts";
 import { CreateApp } from "../apps/Create.tsx";
 import { BrowserApp } from "../apps/Browser.tsx";
 import { VectorApp } from "../apps/Vector.tsx";
+import { ExplorerApp, PickerHost } from "../apps/Explorer.tsx";
 import { ICONS, loadBackupFile, openSettings, useWide } from "./desktopApi.tsx";
+import { copyText } from "../lib/clipboard.ts";
 
 
 const BODIES: Record<AppId, () => ReactNode> = {
@@ -53,8 +75,12 @@ const BODIES: Record<AppId, () => ReactNode> = {
   presence: () => <PresenceApp />,
   cast: () => <CastApp />,
   files: () => <FilesApp />,
+  explorer: () => <ExplorerApp />,
   notes: () => <NotesApp />,
   music: () => <MusicApp />,
+  theater: () => <TheaterApp />,
+  pads: () => <PadsApp />,
+  luanti: () => <LuantiApp />,
   visualizer: () => <VisualizerApp />,
   create: () => <CreateApp />,
   browser: () => <BrowserApp />,
@@ -80,6 +106,36 @@ export function Desktop() {
   const fileRef = useRef<HTMLInputElement>(null);
   useSensors();
 
+  // Phones: the back gesture (or button) closes what's on top — Classic, then Hangout, then the front window,
+  // which shows the one under it — instead of leaving the page. With nothing open, back leaves as usual.
+  useEffect(() => {
+    if (!phone) return;
+    const shown = () => {
+      const d = desk();
+      return APPS.filter((a) => d.wins[a.id].open && !d.wins[a.id].min).sort((a, b) => d.wins[b.id].z - d.wins[a.id].z);
+    };
+    const closable = () => desk().classic || desk().hangout || shown().length > 0;
+    // one history step of our own stands in front of the page while there's something to close
+    const arm = () => {
+      if (closable() && !(history.state as { pddBack?: boolean } | null)?.pddBack) history.pushState({ pddBack: true }, "");
+    };
+    const back = () => {
+      const d = desk();
+      if (d.classic) d.set({ classic: false });
+      else if (d.hangout) d.set({ hangout: false });
+      else if (shown()[0]) d.closeApp(shown()[0].id);
+      arm();
+    };
+    arm();
+    const unsub = useDesk.subscribe(arm);
+    window.addEventListener("popstate", back);
+    return () => {
+      unsub();
+      window.removeEventListener("popstate", back);
+    };
+  }, [phone]);
+
+  const unloaded = useUnloaded();
   const locked = s.accounts.length > 0 && !s.session;
   const focusChar = s.character(s.focus);
   const accent = focusChar?.accent ?? "#b9a4ff";
@@ -96,13 +152,48 @@ export function Desktop() {
 
   useEffect(() => {
     resumeBridges();
+    // PADS: this device reports in while it's switched on here (it does nothing until then)
+    startPads();
+    startPadsControl();
+    // memory: minimized windows unloaded after a while, when that's switched on
+    startMemory();
+    // characters with a heartbeat check in on their own (each beat taken by one device)
+    startHeartbeat();
+    // pinches zoom SEASIDE, two-finger taps are right-clicks, and right-clicks get SEASIDE's menus
+    startGestures();
     const backups = startBackupSchedule();
     startChatSync();
+    void loadResidentKeys();
+    startHeart();
+    startOwnTime();
+    startBodies();
+    startTerminalSync();
+    // the shared desk, live; and a device that had its own desk before is asked what to do with it, once
+    startDeskSync();
+    // (the flag is cleared before asking, so the question comes once even if this runs twice)
+    if (shouldAsk() && (doneAsking(), true))
+      void askUser(
+        "This device has its own SEASIDE from before",
+        "Your desk is shared between your devices now. This one had a desk of its own here, and it's been set aside safely (a copy is kept on the server too, keys left out). You can look at what it has and bring things into the shared desk, or keep this device on its own desk.",
+        "Look at it",
+        "Later",
+      ).then((yes) => {
+        if (yes) openSettings("backup");
+      });
     void loadNotes();
     if (desk().api.on) void applyInbound();
     for (const srv of desk().mcp) if (srv.enabled) void connectServer(srv);
+    syncCharacterMcp();
+    startTravel();
+    // A character's mcp.json is her own servers: follow it when her files change.
+    const unFiles = useDesk.subscribe((s, prev) => {
+      if (s.files !== prev.files || s.custom !== prev.custom) syncCharacterMcp();
+    });
     if (desk().firstRun) desk().set({ firstRun: false });
-    return () => window.clearInterval(backups);
+    return () => {
+      window.clearInterval(backups);
+      unFiles();
+    };
   }, []);
 
   useEffect(() => {
@@ -123,11 +214,11 @@ export function Desktop() {
     };
   }, []);
 
-  if (s.classic) return <Classic />;
+  if (s.classic && !s.toddler) return <Classic />;
 
   return (
     <div
-      className={`desktop${phone ? " phone" : ""}${s.menuBar && !s.bar.autoHide ? "" : " no-menu"}${s.menuBar && s.bar.edge === "bottom" && !s.bar.autoHide ? " bar-bottom" : ""}${s.menuBar && s.bar.autoHide ? " bar-auto" : ""}${s.hangout ? " hangout-on" : ""} dock-${s.dock.edge}${s.dock.autoHide && s.dock.edge !== "float" ? " dock-auto" : ""}`}
+      className={`desktop${phone ? " phone" : ""}${s.menuBar && !s.bar.autoHide ? "" : " no-menu"}${s.menuBar && s.bar.edge === "bottom" && !s.bar.autoHide ? " bar-bottom" : ""}${s.menuBar && s.bar.autoHide ? " bar-auto" : ""}${s.hangout ? " hangout-on" : ""} dock-${phone && s.dock.edge !== "top" ? "bottom" : s.dock.edge}${s.dock.autoHide && (phone || s.dock.edge !== "float") ? " dock-auto" : ""}`}
       style={{ ["--dock-h" as string]: `${s.dock.size + (s.dock.labels ? 14 : 0) + 20}px` }}
       onDragOver={(e) => {
         if ([...e.dataTransfer.types].includes("Files")) {
@@ -146,7 +237,7 @@ export function Desktop() {
     >
       <div
         className={`wallpaper${wallpaper ? "" : " plain"}`}
-        style={{ ...(wallpaper ? { backgroundImage: `url("${wallpaper}")` } : {}), ["--dim" as string]: s.hangout ? s.hang.dim : 0.62 }}
+        style={{ ...(wallpaper ? { backgroundImage: `url("${wallpaper}")` } : {}), ["--dim" as string]: s.hang.dim }}
       />
       {s.music.vizBackground && s.music.viz !== "off" && !s.hangout ? (
         <div className="viz-background" style={{ opacity: s.music.vizBackgroundOpacity }} aria-hidden>
@@ -163,7 +254,7 @@ export function Desktop() {
           if (e.target === e.currentTarget && desk().touch.doubleTapScene) desk().set({ hangout: true });
         }}
       >
-        {APPS.map((a) => (
+        {APPS.filter((a) => !s.toddler || inToddler(a.id)).map((a) => (
           <Window
             key={a.id}
             id={a.id}
@@ -173,14 +264,19 @@ export function Desktop() {
             extra={a.id === "games" && s.game ? <GameBar /> : undefined}
             lead={a.id === "games" && s.game ? <GameBack /> : undefined}
           >
-            <Boundary name={a.title}>{BODIES[a.id]()}</Boundary>
+            {/* a window unloaded to save memory (Settings → Memory) is drawn again when it's opened */}
+            <Boundary name={a.title}>{unloaded.has(a.id) ? null : BODIES[a.id]()}</Boundary>
           </Window>
         ))}
       </div>
-      <Dock front={front} />
+      <Cats />
+      <Dock front={front} phone={phone} menus={phone && !s.toddler ? (el) => phoneMenu(el, () => fileRef.current?.click()) : undefined} />
       {drop ? <div className="drop-hint">Drop a character backup to bring them in</div> : null}
       <ContextMenuHost />
       <AskHost />
+      <SharedIn />
+      <PadsMail />
+      <PickerHost />
       <TooltipHost />
       {s.toast ? (
         <div className="toast" role="status" onClick={() => desk().set({ toast: "" })}>
@@ -287,6 +383,54 @@ function barMenu(): MenuItem[] {
   ];
 }
 
+/** A phone has no room for the menu bar: the dock's first button opens its menus instead, one at a time. */
+function phoneMenu(el: Element, onLoad: () => void) {
+  const s = desk();
+  const focusChar = s.character(s.focus);
+  const back: MenuItem = { label: "‹ Menus", run: () => phoneMenu(el, onLoad) };
+  const sub = (items: MenuItem[]) => () => openMenuAt(el, [back, { sep: true }, ...items]);
+  const menus: Record<string, MenuItem[]> = {
+    Pandora: [
+      { label: "Getting started", run: () => s.openApp("welcome") },
+      { label: "Settings…", run: () => openSettings() },
+      ...(s.toddler ? [] : ([{ label: "Classic Pandora Dee", run: () => s.set({ classic: true }) }, { label: "🧸 Toddler mode", run: () => (startToddler() ? openSettings("adult") : s.say("Toddler mode is on. The passcode turns it off.")) }] as MenuItem[])),
+      { label: "Lock the desktop", disabled: !s.accounts.length, run: () => s.lock() },
+    ],
+    File: [
+      { label: "New character…", run: () => s.openApp("cast") },
+      { label: "Load a character backup…", run: onLoad },
+      { label: `Save ${focusChar?.short ?? "character"}'s backup`, disabled: !focusChar, run: () => focusChar && download(`${focusChar.id}-backup.json`, makeBackup(focusChar, s.filesOf(focusChar.id))) },
+      { label: "Export or import everything…", run: () => openSettings("backup") },
+    ],
+    Edit: [
+      { label: "Copy the conversation", run: () => void copyText(s.messages.filter((m) => !m.pass).map((m) => `${m.name}: ${m.text}`).join("\n\n")).then((ok) => ok && desk().say("Conversation copied.")) },
+      { label: "Clear the conversation", run: () => s.clearRoom() },
+      { label: "Preferences…", run: () => openSettings() },
+    ],
+    View: [
+      { label: "Hangout: just the scene and the characters", run: () => s.set({ hangout: true }) },
+      { label: "Characters on the desktop", checked: s.hang.onDesktop, run: () => s.set({ hang: { ...s.hang, onDesktop: !s.hang.onDesktop } }) },
+      { label: "Character wallpaper", checked: s.wallpaper, run: () => s.set({ wallpaper: !s.wallpaper }) },
+      { label: "Bigger text", run: () => s.set({ fontSize: Math.min(22, s.fontSize + 1) }) },
+      { label: "Smaller text", run: () => s.set({ fontSize: Math.max(12, s.fontSize - 1) }) },
+      { label: "Full screen", run: () => void (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.()) },
+    ],
+    Window: [
+      ...APPS.filter((a) => !s.toddler || inToddler(a.id)).map((a): MenuItem => ({ label: a.title, checked: s.wins[a.id].open, run: () => s.openApp(a.id) })),
+      { sep: true },
+      { label: "Reset the layout", run: () => s.resetLayout() },
+    ],
+    Help: [
+      { label: "Getting started", run: () => s.openApp("welcome") },
+      { label: "Connect an AI model", run: () => openSettings("ai") },
+      { label: "Privacy, explained", run: () => openSettings("privacy") },
+      ...(installed() ? [] : [{ label: "Install as an app", run: () => void install().then((m) => m && desk().say(m)) }]),
+    ],
+  };
+  // (a menu closes when one of its lines is chosen, so the submenu opens just after)
+  openMenuAt(el, Object.entries(menus).map(([label, items]): MenuItem => ({ label: `${label} ›`, run: () => window.setTimeout(sub(items), 0) })));
+}
+
 function MenuBar({ onLoad }: { onLoad: () => void }) {
   const s = useDesk();
   const [open, setOpen] = useState<string | null>(null);
@@ -342,7 +486,7 @@ function MenuBar({ onLoad }: { onLoad: () => void }) {
     ...(s.bridges.discord.enabled && allowed(s.privacy, "bridges") ? ["Discord"] : []),
     ...(s.bridges.vector.enabled && allowed(s.privacy, "bridges") ? ["Vector"] : []),
     ...(allowed(s.privacy, "web") ? ["web tools"] : []),
-    ...s.mcp.filter((m) => m.enabled && scopeOf(m.url) !== "device" && allowed(s.privacy, "remote-tools")).map((m) => `${m.name} (MCP)`),
+    ...s.mcp.filter((m) => m.enabled && !m.stdio && scopeOf(m.url) !== "device" && allowed(s.privacy, "remote-tools")).map((m) => `${m.name} (MCP)`),
     ...(s.sshOn && allowed(s.privacy, "ssh") && s.sshHosts.length ? ["SSH"] : []),
     ...(s.api.on && s.api.lan && allowed(s.privacy, "api") ? ["inbound API on Wi-Fi"] : []),
     ...(s.backup.url && allowed(s.privacy, "backup") ? ["backups"] : []),
@@ -399,7 +543,18 @@ function MenuBar({ onLoad }: { onLoad: () => void }) {
           Settings… <span className="kbd">Ctrl ,</span>
         </button>
         <div className="sep" />
-        <button onClick={act(() => desk().set({ classic: true }))}>Classic Pandora Dee</button>
+        {s.toddler ? null : <button onClick={act(() => desk().set({ classic: true }))}>Classic Pandora Dee</button>}
+        {/* on straight away, no passcode asked; the passcode is what turns it off (until one is set, Settings asks for one first) */}
+        {s.toddler ? null : (
+          <button
+            onClick={act(() => {
+              if (startToddler()) openSettings("adult");
+              else desk().say("Toddler mode is on. The passcode turns it off (the 🧸 at the top).");
+            })}
+          >
+            🧸 Toddler mode
+          </button>
+        )}
         <div className="sep" />
         <button disabled={!s.accounts.length} onClick={act(() => desk().lock())}>
           Lock the desktop
@@ -414,6 +569,12 @@ function MenuBar({ onLoad }: { onLoad: () => void }) {
         >
           Save {focusChar?.short ?? "character"}'s backup
         </button>
+        <button
+          disabled={!focusChar}
+          onClick={act(() => focusChar && download(`${focusChar.id}-classic-config.json`, toClassic(focusChar, desk().filesOf(focusChar.id), desk().charPrefs[focusChar.id], desk().model.connections)))}
+        >
+          Export {focusChar?.short ?? "character"} for Classic (Pandora Dee / Jade Vault)
+        </button>
         <div className="sep" />
         <button onClick={act(() => openSettings("backup"))}>Export or import everything…</button>
       </Menu>
@@ -424,7 +585,7 @@ function MenuBar({ onLoad }: { onLoad: () => void }) {
               .messages.filter((m) => !m.pass)
               .map((m) => `${m.name}: ${m.text}`)
               .join("\n\n");
-            navigator.clipboard?.writeText(text).then(() => desk().say("Conversation copied."));
+            copyText(text).then((ok) => ok && desk().say("Conversation copied."));
           })}
         >
           Copy the conversation
@@ -451,11 +612,11 @@ function MenuBar({ onLoad }: { onLoad: () => void }) {
         <button onClick={act(() => desk().set({ fontSize: Math.min(22, s.fontSize + 1) }))}>Bigger text</button>
         <button onClick={act(() => desk().set({ fontSize: Math.max(12, s.fontSize - 1) }))}>Smaller text</button>
         <div className="sep" />
-        <button onClick={act(() => desk().set({ classic: true }))}>Classic Pandora Dee</button>
+        {s.toddler ? null : <button onClick={act(() => desk().set({ classic: true }))}>Classic Pandora Dee</button>}
         <button onClick={act(() => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.()))}>Full screen</button>
       </Menu>
       <Menu id="window" label="Window">
-        {APPS.map((a) => (
+        {APPS.filter((a) => !s.toddler || inToddler(a.id)).map((a) => (
           <button key={a.id} onClick={act(() => desk().openApp(a.id))}>
             <Tick on={s.wins[a.id].open} /> {a.title}
           </button>
@@ -502,6 +663,7 @@ function MenuBar({ onLoad }: { onLoad: () => void }) {
             Adult shelf open
           </button>
         ) : null}
+        <ToddlerPill />
         <VolumeControl />
         <Clock />
         {s.accounts.length ? (

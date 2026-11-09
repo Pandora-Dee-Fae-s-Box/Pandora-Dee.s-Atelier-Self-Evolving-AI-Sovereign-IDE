@@ -4,7 +4,7 @@ import { ViaPicker } from "../ui/Via.tsx";
 import { askUser } from "../ui/Ask.tsx";
 import { VIA_OPTIONS } from "../lib/outbound.ts";
 import { desk, uid, useDesk, type Bridge, type BridgeId, type Exposure, type McpServer, type SshHost } from "../lib/store.ts";
-import { connectServer, disconnect, links } from "../lib/connections.ts";
+import { allowStdio, connectServer, disconnect, links, stdioStatus, type StdioStatus } from "../lib/connections.ts";
 import { startBridge, stopBridge } from "../lib/bridges.ts";
 import { allowed, FEATURES, type Feature } from "../lib/privacy.ts";
 import { scopeOf, SCOPE_LABEL } from "../lib/model.ts";
@@ -16,12 +16,14 @@ import { download } from "../lib/backup.ts";
 import { RiskDialog, Seg, Sensitive, timeOf } from "../ui/common.tsx";
 import { Num } from "../ui/Num.tsx";
 import { useWidth } from "../ui/hooks.ts";
+import { copyText } from "../lib/clipboard.ts";
 
-type Tab = "discord" | "vector" | "inbox" | "mcp" | "web" | "ssh" | "api";
+type Tab = "discord" | "vector" | "libraries" | "inbox" | "mcp" | "web" | "ssh" | "api";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "discord", label: "Discord" },
   { id: "vector", label: "Vector" },
+  { id: "libraries", label: "Libraries" },
   { id: "inbox", label: "Inbox" },
   { id: "mcp", label: "Tool servers (MCP)" },
   { id: "web", label: "Web" },
@@ -112,6 +114,7 @@ export function ConnectionsApp() {
       </aside>
       <section className="section">
         {tab === "discord" || tab === "vector" ? <BridgePanel id={tab} key={tab} /> : null}
+        {tab === "libraries" ? <LibrariesPanel /> : null}
         {tab === "inbox" ? <InboxPanel /> : null}
         {tab === "mcp" ? <McpPanel /> : null}
         {tab === "web" ? <WebPanel /> : null}
@@ -146,7 +149,7 @@ function BridgePanel({ id }: { id: BridgeId }) {
   return (
     <>
       <h2>
-        {name} <Sensitive />
+        {name} <Sensitive feature="bridges" />
       </h2>
       <p className="lead small">
         The characters take part in {name} through the {name} bridge, the same bridge Pandora Dee and Jade Vault use. It runs on a computer you keep on; the characters' minds stay here. Discord and Vector can both be on: the characters answer one conversation at a time.
@@ -178,7 +181,7 @@ function BridgePanel({ id }: { id: BridgeId }) {
       <div className="divider" />
       <h4>People</h4>
       <label className="field">
-        <span>Your own {idLabel}: you're their locksmith, holding the keys to every tool</span>
+        <span>Your own {idLabel}: the characters know you here, and every tool is yours to use through them</span>
         <input className="input mono" value={b.owner} onChange={(e) => patch({ owner: e.target.value.trim() })} />
       </label>
       <label className="field">
@@ -270,7 +273,7 @@ function BridgePanel({ id }: { id: BridgeId }) {
       )}
 
       <div className="divider" />
-      <h4>Secretary</h4>
+      <h4>Messages for you</h4>
       <label className="field">
         <span>Messages for you</span>
         <Seg
@@ -347,6 +350,48 @@ const EXPOSURES: { id: Exposure; label: string; detail: string }[] = [
   { id: "hidden", label: "Hidden", detail: "Connected, but not callable" },
 ];
 
+/** A program server: the locksmith allows it (this exact command, folder and settings), sees what it printed lately. */
+function StdioControls({ m }: { m: McpServer }) {
+  const [st, setSt] = useState<StdioStatus | null>(null);
+  const [problem, setProblem] = useState("");
+  const look = () => void stdioStatus(m).then(setSt, (e: Error) => setProblem(e.message));
+  useEffect(look, [m.id, JSON.stringify(m.stdio)]); // eslint-disable-line react-hooks/exhaustive-deps
+  const env = Object.entries(m.stdio?.env ?? {});
+  const act = (allow: boolean) =>
+    void allowStdio(m, allow).then(
+      () => (setProblem(""), look()),
+      (e: Error) => setProblem(e.message),
+    );
+  return (
+    <div className="small" style={{ marginTop: 6 }}>
+      {m.stdio?.cwd ? <div className="mono faint">in {m.stdio.cwd}</div> : null}
+      {env.length ? <div className="mono faint">with {env.map(([k, v]) => `${k}=${/\$\{/.test(v) ? v : "…"}`).join(" ")}</div> : null}
+      <div className="row" style={{ gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+        {st?.allowed ? (
+          <>
+            <span className="muted">Allowed{st.running ? ", running" : st.exited ? `, ${st.exited}` : ""}.</span>
+            <button className="btn small" onClick={() => act(false)}>
+              Stop allowing
+            </button>
+          </>
+        ) : (
+          <>
+            <span className="muted">{m.owner ? `${desk().character(m.owner)?.short ?? m.owner} asks` : "It asks"} to run this program on this computer, with the same access you have.</span>
+            <button className="btn small primary" onClick={() => act(true)}>
+              Allow and start
+            </button>
+          </>
+        )}
+        <button className="btn small" onClick={look}>
+          Refresh
+        </button>
+      </div>
+      {problem ? <div className="small danger-text">{problem}</div> : null}
+      {st?.log.length ? <pre className="mono small faint" style={{ whiteSpace: "pre-wrap", maxHeight: 120, overflow: "auto", margin: "6px 0 0" }}>{st.log.join("\n")}</pre> : null}
+    </div>
+  );
+}
+
 function McpPanel() {
   const s = useDesk();
   useLinks();
@@ -368,13 +413,13 @@ function McpPanel() {
   return (
     <>
       <h2>Tool servers (MCP)</h2>
-      <p className="lead small">More tools for the characters, from any MCP server that speaks streamable HTTP. Servers on this computer work right away; others need permission. The same mcp.json as Classic can be brought in or saved.</p>
-      {s.mcp.some((m) => scopeOf(m.url) !== "device") ? <Permission feature="remote-tools" /> : null}
+      <p className="lead small">More tools for the characters, from any MCP server that speaks streamable HTTP. Servers on this computer work right away; others need permission. The same mcp.json as Classic can be brought in or saved. A character's own mcp.json (in her files) adds servers only she uses.</p>
+      {s.mcp.some((m) => !m.stdio && scopeOf(m.url) !== "device") ? <Permission feature="remote-tools" /> : null}
       <div className="row" style={{ marginBottom: 12 }}>
         <button className="btn small" onClick={() => fileRef.current?.click()}>
           <Upload size={13} /> Bring in mcp.json
         </button>
-        <button className="btn small" disabled={!s.mcp.length} onClick={() => download("mcp.json", JSON.parse(toMcpJson(s.mcp)))}>
+        <button className="btn small" disabled={!s.mcp.some((m) => !m.owner)} onClick={() => download("mcp.json", JSON.parse(toMcpJson(s.mcp.filter((m) => !m.owner))))}>
           <Download size={13} /> Save mcp.json
         </button>
       </div>
@@ -385,7 +430,12 @@ function McpPanel() {
           <div key={m.id} className={`conn${m.enabled ? "" : " off"}`}>
             <div className="row">
               <b>{m.name}</b>
-              <span className="pill">{SCOPE_LABEL[scopeOf(m.url)]}</span>
+              <span className="pill">{m.stdio ? "Program on this computer" : SCOPE_LABEL[scopeOf(m.url)]}</span>
+              {m.owner ? (
+                <span className="pill" title="From her mcp.json; only she uses it. Edit her file to change it.">
+                  {s.character(m.owner)?.name ?? m.owner}'s own
+                </span>
+              ) : null}
               <StateLine k={`mcp:${m.id}`} />
               <span className="grow" />
               <button
@@ -420,10 +470,12 @@ function McpPanel() {
               </button>
             </div>
             <div className="small mono muted" style={{ marginTop: 4 }}>
-              {m.url}
+              {m.stdio ? [m.stdio.command, ...(m.stdio.args ?? [])].join(" ") : m.url}
             </div>
             <ErrorLine k={`mcp:${m.id}`} />
-            <div style={{ marginTop: 8 }}>
+            {m.stdio ? <StdioControls m={m} /> : null}
+            {/* a program on this computer is reached directly, not through a connection method */}
+            <div style={{ marginTop: 8, display: m.stdio ? "none" : undefined }}>
               <ViaPicker
                 value={m.via}
                 inherit={`Same as the default (Connections → Web): ${VIA_OPTIONS.find((o) => o.id === s.net.via)?.label}`}
@@ -541,7 +593,7 @@ function McpPanel() {
         ))}
       </div>
       <p className="small faint" style={{ marginTop: 8 }}>
-        A server that only runs as a command (stdio) can be wrapped for the browser with: npx -y supergateway --stdio "your command" --outputTransport streamableHttp
+        A server that runs as a program (stdio) goes in an mcp.json with "command" (and "args", "env", "cwd"): bring it in above, or put it in a character's own mcp.json. The desktop runs it on this computer once you allow it; {"${KEY_NAME}"} in its settings comes from Keys.
       </p>
       <input
         ref={fileRef}
@@ -701,7 +753,7 @@ function SshPanel() {
   return (
     <>
       <h2>
-        SSH <Sensitive />
+        SSH <Sensitive feature="ssh" />
       </h2>
       <p className="lead small">Machines the characters (and you) can open terminal sessions on. Passwords and keys stay on this computer; the characters only ever see the names. The first connection to a machine asks you to approve its key.</p>
       <Permission feature="ssh" />
@@ -866,7 +918,7 @@ function ApiPanel() {
   return (
     <>
       <h2>
-        Inbound API <Sensitive />
+        Inbound API <Sensitive feature="api" />
       </h2>
       <p className="lead small">
         Other programs (scripts, shortcuts, home automation) can talk to the characters, the same way as Pandora Dee and Jade Vault on Android: GET requests to <span className="mono">/v1/chat</span>, <span className="mono">/v1/status</span>, <span className="mono">/v1/history</span>, <span className="mono">/v1/chats</span> and <span className="mono">/v1/health</span>, with a token. The desktop has to be open to answer.
@@ -891,7 +943,7 @@ function ApiPanel() {
           <button className="btn small" onClick={() => setShow(!show)}>
             {show ? "Hide" : "Show"}
           </button>
-          <button className="icon-btn" aria-label="Copy token" disabled={!tok} onClick={() => navigator.clipboard?.writeText(tok)}>
+          <button className="icon-btn" aria-label="Copy token" disabled={!tok} onClick={() => copyText(tok)}>
             <Copy size={14} />
           </button>
           <button
@@ -913,6 +965,65 @@ function ApiPanel() {
       <pre className="mono small" style={{ whiteSpace: "pre-wrap" }}>{`curl --get -H "Authorization: Bearer $TOKEN" \\
   --data-urlencode 'message=What did we decide yesterday?' \\
   "${base}/v1/chat"`}</pre>
+    </>
+  );
+}
+
+// ---------- Libraries (the fserve) ----------
+
+/** Each character's library: the linked folders she may hand out on Vector and Discord, and how files go. */
+function LibrariesPanel() {
+  const fserve = useDesk((s) => s.fserve);
+  const [links, setLinks] = useState<{ name: string; for: string[]; serve: boolean; path?: string }[]>([]);
+  useEffect(() => {
+    void fetch("/api/library/links").then((r) => r.json()).then((j: { links: typeof links }) => setLinks(j.links ?? []), () => undefined);
+  }, []);
+  const set = (p: Partial<typeof fserve>) => desk().set({ fserve: { ...fserve, ...p } });
+  const served = links.filter((l) => l.serve);
+  const whose = (l: { for: string[] }) => (l.for.length ? l.for.map((id) => desk().character(id)?.short ?? id).join(", ") : "everyone");
+  return (
+    <>
+      <h2>Libraries</h2>
+      <p className="small muted">
+        Each character keeps her own library: the folders linked for her that she may hand out. On Vector and Discord, whoever is answering shares hers the
+        old-school way: <span className="mono">!list</span>, <span className="mono">@find words</span>, <span className="mono">!get 12</span>,{" "}
+        <span className="mono">!queue</span>. The one named in the message answers, or else the one that bridge answers as. Commands follow the bridge's own rules:
+        DMs as its DM setting says, and in groups only the channels it watches.
+      </p>
+      <Permission feature="fserve" />
+      <h4>On the shelves</h4>
+      {served.length ? (
+        <ul className="small">
+          {served.map((l) => (
+            <li key={l.name}>
+              <b>{l.name}</b> <span className="faint">· {whose(l)}</span>
+              {l.path ? <span className="mono faint"> · {l.path}</span> : null}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="small faint">
+          Nothing yet. In Explorer, right-click a folder → Link for the characters to read…, then right-click it again → They may hand it out.
+        </p>
+      )}
+      <h4>How files go</h4>
+      <label className="field">
+        <span>Attach files up to (MB)</span>
+        <input className="input" type="number" min={1} max={25} value={fserve.attachMB} onChange={(e) => set({ attachMB: Math.max(1, Math.min(25, Number(e.target.value) || 8)) })} style={{ maxWidth: 100 }} />
+      </label>
+      <label className="field">
+        <span>Bigger ones go as links to this address</span>
+        <input
+          className="input mono"
+          value={fserve.linkBase}
+          onChange={(e) => set({ linkBase: e.target.value.trim() })}
+          placeholder="https://your-pc.your-tailnet.ts.net  or  http://192.168.1.10:15693"
+        />
+      </label>
+      <p className="small faint">
+        Whoever gets a link can download that one file for a day, if they can reach this address: your tailnet's address reaches your own devices anywhere, a LAN
+        address only people at home. Left empty, big files are named but not sent.
+      </p>
     </>
   );
 }

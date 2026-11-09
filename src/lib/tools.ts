@@ -5,16 +5,22 @@ import { desk } from "./store.ts";
 import { allowed } from "./privacy.ts";
 import type { ToolSpec } from "./model.ts";
 import { links } from "./connections.ts";
-import { httpRequest, webFetch, webSearch, type HttpArgs } from "./net.ts";
+import { fillSecrets, httpRequest, redact, webFetch, webSearch, type HttpArgs } from "./net.ts";
 import { discordHistory, discordTool, notifyLocksmith, saveToVault, vectorTool } from "./messengers.ts";
 import { allMcp, callMcp, listResources, readResource, runCodemode, searchMcp, specOf } from "./mcptools.ts";
 import { sshTool } from "./ssh.ts";
+import { run } from "./shell.ts";
+import { mcpCommand } from "./mcpshell.ts";
 import { backupTool } from "./serverBackup.ts";
 import { gameScreen } from "./bus.ts";
 import { describeRows, library, recentLive, sendLive, sendUpdate } from "./xdc.ts";
 import { findSkill, searchSkills, skillsOf } from "./skills.ts";
 import { allTasks, baseOf, cleanVaultPath, isNote, loadNotes, noteName, noteTags, resolveNote, searchNotes, tasksIn, toggleTaskText, useNotes, vaultIndex, writeNote } from "./notes.ts";
 import { openNote } from "../ui/noteNav.ts";
+import { envFor, residentNames, setResidentKey } from "./residentKeys.ts";
+import { setBudget, usageSummary } from "./meter.ts";
+import { hostOf, LOG_HEADER, logLine, logPath, macroPath, noteSeen, noteStep, type Trail } from "./adventureCore.ts";
+import { addToCollection, AUTO_COLLS, compareTexts, memoryPrefs, memoryStatus, rebuildMemory, removeFromIndex, searchMemory, syncMemory } from "./vecmem.ts";
 
 /** Who is asking: the locksmith (the person who holds the keys: everything), an admin (messenger powers) or the public (their own chat). */
 export type Scope = "locksmith" | "admin" | "public";
@@ -30,6 +36,10 @@ export type TurnCtx = {
   senderName?: string;
   /** Deferred MCP tools loaded with tool_search during this turn. */
   loaded: Set<string>;
+  /** The connection and model she's thinking with this turn (for her adventure log). */
+  model?: string;
+  /** Pictures a tool took for her to see (her browser tab): shown to the model after the tool's result. */
+  seen?: { data: string; mime: string }[];
 };
 
 type Tool = ToolSpec & { run: (charId: string, args: Record<string, unknown>, ctx: TurnCtx) => Promise<string> };
@@ -130,6 +140,11 @@ const MEMORY: Tool = {
     const lines = memoryLines(id);
     if (action === "list") return lines.length ? lines.map((l) => `${l.n}. [${l.section || "Memory"}] ${l.text}`).join("\n") : "Your memory has no kept lines yet.";
     if (action === "search") {
+      // with vector memory on, search memory and journal by meaning as well as words (as Classic does)
+      if (memoryPrefs(id).vectors && text.trim()) {
+        const r = await searchMemory(id, text, { k: 10 }).catch(() => undefined);
+        if (r?.hits.length) return (r.note ? `[${r.note}]\n` : "") + r.hits.map((h) => `${h.coll}${h.head ? ` · ${h.head}` : ""}: ${h.text.replace(/\s+/g, " ").slice(0, 300)}`).join("\n");
+      }
       const words = text.toLowerCase().split(/\W+/).filter(Boolean);
       const hits = lines.filter((l) => words.some((w) => l.text.toLowerCase().includes(w)));
       return hits.length ? hits.map((l) => `${l.n}. [${l.section || "Memory"}] ${l.text}`).join("\n") : "Nothing in your memory matches.";
@@ -139,6 +154,91 @@ const MEMORY: Tool = {
       return n ? `Forgot ${n} line${n === 1 ? "" : "s"}.` : "Nothing matched, so nothing was forgotten. Use list to see the numbers.";
     }
     return "Use save, list, search or forget.";
+  },
+};
+
+const EMBEDDINGS: Tool = {
+  name: "embeddings",
+  description:
+    "Your vector memory: memory, journal, notes and your own collections, searched by meaning and keywords together. search: find passages (query; collection: memory, journal, notes, or your own, comma-separated, empty = all; mode: hybrid, semantic or keyword; k); add: store texts in a collection of your own (collection, text or texts); index: embed your notes (path to limit it); remove: by id, source or collection; compare: how close two texts are in meaning (a, b); rebuild: after changing the embedding model; status.",
+  parameters: obj(
+    {
+      action: { type: "string", description: "search, add, index, remove, compare, rebuild or status" },
+      query: { type: "string", description: "search: what to look for" },
+      collection: { type: "string", description: "Collection name(s), comma-separated" },
+      mode: { type: "string", description: "search: hybrid (default), semantic or keyword" },
+      k: { type: "number", description: "search: how many results (1-30)" },
+      text: { type: "string", description: "add: the text to store" },
+      texts: { type: "array", description: "add: several texts to store" },
+      source: { type: "string", description: "add: where it came from · remove: remove everything from this source" },
+      head: { type: "string", description: "add: a short title" },
+      path: { type: "string", description: "index: only notes under this folder" },
+      id: { type: "number", description: "remove: one text by its id" },
+      a: { type: "string", description: "compare: the first text" },
+      b: { type: "string", description: "compare: the second text" },
+    },
+    ["action"],
+  ),
+  run: async (id, a) => {
+    const action = str(a.action, "status").toLowerCase();
+    const colls = a.collection ? str(a.collection).split(/\s*,\s*/).filter(Boolean) : null;
+    const vectors = Boolean(memoryPrefs(id).vectors);
+    if (action === "status") {
+      const s = await memoryStatus(id);
+      return (
+        `Vector memory is ${vectors ? "on" : "off (keyword search only; it can be switched on in Characters → your profile → memory)"}. Embedding model: ${s.model || s.want}${s.dim ? ` (${s.dim} numbers per text)` : " (nothing embedded yet)"} via ${s.via}.\n` +
+        (s.collections.length ? s.collections.map((c) => `- ${c.name}: ${c.chunks} texts, ${c.embedded} embedded`).join("\n") : "The index is empty.") +
+        (s.error ? `\nLast problem: ${s.error}` : "")
+      );
+    }
+    if (["search", "find", "query"].includes(action)) {
+      const q = str(a.query ?? a.text);
+      if (!q.trim()) return "search needs a query.";
+      const mode = (["hybrid", "semantic", "keyword"].includes(str(a.mode)) ? str(a.mode) : "hybrid") as "hybrid" | "semantic" | "keyword";
+      const r = await searchMemory(id, q, { colls, k: Math.max(1, Math.min(30, Number(a.k) || 8)), mode });
+      if (!r.hits.length) return `Nothing found${colls ? ` in ${colls.join(", ")}` : ""}${r.note ? ` (${r.note})` : ""}. Use the index action to add your notes first, or store text with add.`;
+      return (
+        (r.note ? `[${r.note}]\n` : "") +
+        r.hits
+          .map((h, i) => `${i + 1}. [${h.coll}${h.src && h.coll !== "memory" ? ` · ${h.src}` : ""}${h.head && h.coll === "notes" ? ` › ${h.head}` : ""}] ${h.text.replace(/\s+/g, " ").slice(0, 400)}  (id ${h.id}${h.distance !== null ? `, similarity ${(1 - h.distance).toFixed(2)}` : ""}${h.kw ? ", keyword match" : ""})`)
+          .join("\n")
+      );
+    }
+    if (["add", "store", "save"].includes(action)) {
+      const coll = str(a.collection).trim();
+      if (!coll) return "add needs a collection name.";
+      if (AUTO_COLLS.includes(coll)) return `"${coll}" is filled from your files by itself; pick another collection name (or use the memory tool to remember a fact).`;
+      const texts = Array.isArray(a.texts) ? a.texts.map((t) => str(t)) : [str(a.text)];
+      let n = 0, err = "";
+      for (const t of texts) {
+        if (!t.trim()) continue;
+        const r = await addToCollection(id, coll, t, str(a.source), str(a.head));
+        if (r.added) n++;
+        if (r.error) err = r.error;
+      }
+      return `Stored ${n} text${n === 1 ? "" : "s"} in "${coll}".` + (err ? ` Not embedded yet (${err}); keyword search still finds ${n === 1 ? "it" : "them"}.` : vectors ? "" : " (Keyword search only while vector memory is off.)");
+    }
+    if (action === "index") {
+      const path = a.path ? cleanPath(str(a.path)) : "";
+      const r = await syncMemory(id, { notes: true, path });
+      const s = await memoryStatus(id);
+      const n = s.collections.find((c) => c.name === "notes");
+      return `Indexed your notes${path ? ` under ${path}` : ""}: ${r.added} new, ${r.removed} removed, ${r.embedded} embedded; "notes" holds ${n?.chunks ?? 0} passages.` + (r.error ? ` Problem: ${r.error}` : "");
+    }
+    if (["remove", "delete", "forget"].includes(action)) {
+      const n = await removeFromIndex(id, { id: a.id ? Number(a.id) : undefined, coll: colls?.[0], src: str(a.source ?? a.path) || undefined });
+      return `Removed ${n} text${n === 1 ? "" : "s"} from the index.`;
+    }
+    if (["compare", "similar", "similarity"].includes(action)) {
+      if (!a.a || !a.b) return "compare needs texts a and b.";
+      const d = await compareTexts(id, str(a.a), str(a.b));
+      return `Cosine similarity ${d.toFixed(3)} (1 = same meaning, near 0 = unrelated).`;
+    }
+    if (action === "rebuild") {
+      const r = await rebuildMemory(id);
+      return `Rebuilt: ${r.added} texts, ${r.embedded} embedded.` + (r.error ? ` Problem: ${r.error}` : "");
+    }
+    return `Unknown action "${action}" (use search, add, index, remove, compare, rebuild or status).`;
   },
 };
 
@@ -167,26 +267,369 @@ const SKILL: Tool = {
   },
 };
 
+/** Her shell, as in Classic: the Terminal's commands over her own files, one per line, `mcp …` included. */
+const BASH: Tool = {
+  name: "bash",
+  description:
+    "Run shell commands over your own files (ls, cat, grep, echo > file, mv, cp, rm, tree…) and `mcp` to manage and call your tool servers (mcp list | tools | call <tool> '<json>' | add <name> <url> | remove <name> | reconnect). One command per line; type help for the list.",
+  parameters: obj({ command: { type: "string", description: "One or more commands, one per line" } }, ["command"]),
+  run: async (id, a) => {
+    const s = desk();
+    const me = s.character(id);
+    const ctx = {
+      who: me?.short ?? id,
+      host: "seaside",
+      room: s.roomCharacters().map((x) => `${x.short}  ${x.name}`),
+      // her own keys and the household's, by name (values never)
+      env: Object.fromEntries(Object.entries(envFor(id)).map(([k, v]) => [k, v ? "set" : ""])),
+      model: "",
+      characters: [],
+    };
+    let cwd = "";
+    const out: string[] = [];
+    for (const line of str(a.command).split("\n")) {
+      if (!line.trim()) continue;
+      const res = run(line, cwd, desk().filesOf(id), ctx);
+      cwd = res.cwd;
+      if (res.tree) desk().set({ files: { ...desk().files, [id]: res.tree } });
+      if (res.out) out.push(res.out);
+      if (res.action?.kind === "mcp") out.push((await mcpCommand(res.action.argv, id)).out);
+      else if (res.action?.kind === "open") out.push("(open works in the Terminal app; use cat here)");
+      else if (res.action) out.push("(that command works in the Terminal app, not here)");
+    }
+    return out.join("\n").slice(0, 16000) || "(done)";
+  },
+};
+
+/** The desktop's real browser (server/engine.mjs read/act): each character works in her own tab, which shows in the
+ *  Browser window, so people can watch and take over. */
+const herTab = new Map<string, string>();
+async function engineCall<T = Record<string, unknown>>(body: Record<string, unknown>): Promise<T> {
+  const r = await fetch("/api/engine", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = (await r.json().catch(() => ({}))) as { error?: string };
+  if (!r.ok) throw new Error(j.error || `The browser answered ${r.status}.`);
+  return j as T;
+}
+type PageRead = { title: string; url: string; items: string[]; text: string; humanCheck: boolean };
+const pageText = (r: PageRead) =>
+  redact(
+    `${r.title}\n${r.url}\n\nThings you can use:\n${r.items.join("\n") || "(none)"}\n\nThe page:\n${r.text}`,
+  );
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Her adventure log (lib/adventureCore.ts): where she went, what she met, what she did, how it went. */
+const trails = new Map<string, Trail>();
+function logIt(id: string, model: string | undefined, lines: string[]) {
+  if (!lines.length) return;
+  const now = Date.now();
+  const path = logPath(now);
+  const had = desk().filesOf(id)[path];
+  desk().writeFile(id, path, (had ?? LOG_HEADER) + lines.map((l) => logLine(now, model, l)).join("\n") + "\n");
+}
+function seenNow(id: string, model: string | undefined, r: PageRead) {
+  const { trail, lines } = noteSeen(trails.get(id) ?? {}, { host: hostOf(r.url), humanCheck: r.humanCheck }, Date.now());
+  trails.set(id, trail);
+  logIt(id, model, lines);
+}
+
+/** Her recordings: steps saved while recording, kept in her files as macros/<name>.json, to run again. */
+type Step = Record<string, unknown> & { action: string };
+const recording = new Map<string, { name: string; steps: Step[] }>();
+const HANDS = ["move", "click_at", "double_click_at", "right_click_at", "mouse_down", "mouse_up", "drag", "wheel", "type_keys", "key"];
+const BY_REF = ["click", "type", "select", "press", "scroll"];
+const n = (v: unknown) => Math.round(Number(v) || 0);
+function stepWords(a: Step): string {
+  const at = `${n(a.x)},${n(a.y)}`;
+  switch (a.action) {
+    case "open": return `opened ${hostOf(str(a.url)) || str(a.url)}`;
+    case "look": return "looked";
+    case "move": return `moved the mouse to ${at}`;
+    case "click_at": return `clicked at ${at}`;
+    case "double_click_at": return `double-clicked at ${at}`;
+    case "right_click_at": return `right-clicked at ${at}`;
+    case "mouse_down": return `pressed the mouse at ${at}`;
+    case "mouse_up": return `let go of the mouse at ${at}`;
+    case "drag": return `dragged from ${at} to ${n(a.to_x)},${n(a.to_y)}`;
+    case "wheel": return "scrolled with the wheel";
+    case "type_keys": return "typed";
+    case "key": return `pressed ${str(a.key)}`;
+    case "click": return `clicked [${n(a.ref)}]`;
+    case "type": return `typed into [${n(a.ref)}]`;
+    case "select": return `chose in [${n(a.ref)}]`;
+    case "press": return `pressed ${str(a.key, "Enter")}`;
+    case "scroll": return "scrolled";
+    case "back": return "went back";
+    default: return a.action;
+  }
+}
+
+const pathOf = (v: unknown) => {
+  if (Array.isArray(v)) return v;
+  try {
+    const p = JSON.parse(str(v)) as unknown;
+    return Array.isArray(p) ? p : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/** When she uses her browser, the Browser window comes forward on her tab, so whoever is here sees what she sees. */
+async function showHerTab(t: string) {
+  const s = desk();
+  if (s.browser.mode !== "full") s.set({ browser: { ...s.browser, mode: "full" } });
+  s.openApp("browser");
+  await engineCall({ op: "focus", id: t }).catch(() => undefined);
+}
+
+/** One step in her tab (not reading it afterwards). */
+async function browserStep(id: string, a: Step): Promise<string | undefined> {
+  const act = a.action;
+  if (act === "open") {
+    const url = str(a.url).trim();
+    if (!url) return "open needs an address.";
+    const known = herTab.get(id);
+    try {
+      if (!known) throw new Error("none");
+      await engineCall({ op: "go", id: known, url });
+    } catch {
+      herTab.set(id, (await engineCall<{ id: string }>({ op: "open", url })).id);
+    }
+    await pause(1500);
+    return;
+  }
+  const t = herTab.get(id);
+  if (!t) return "You have no tab open yet: use open with an address.";
+  let text = str(a.text);
+  const fromKey = /\{\{\s*[A-Za-z0-9_]+\s*\}\}/.test(text);
+  if (fromKey) text = fillSecrets(text, envFor(id));
+  if (act === "back") {
+    await engineCall({ op: "back", id: t });
+    await pause(1200);
+  } else if (BY_REF.includes(act)) {
+    await engineCall({ op: "act", id: t, action: act, ref: a.ref, text, submit: a.submit === true, value: str(a.value), key: str(a.key, "Enter"), down: a.down !== false, fromKey });
+    await pause(800);
+  } else if (HANDS.includes(act)) {
+    const button = act === "right_click_at" ? "right" : str(a.button, "left");
+    const hand: Record<string, unknown> = { move: { do: "move" }, click_at: { do: "click", count: 1 }, double_click_at: { do: "click", count: 2 }, right_click_at: { do: "click", count: 1 }, mouse_down: { do: "down" }, mouse_up: { do: "up" }, drag: { do: "drag" }, wheel: { do: "wheel" }, type_keys: { do: "type" }, key: { do: "key" } }[act] as Record<string, unknown>;
+    await engineCall({ op: "hand", id: t, ...hand, button, x: a.x, y: a.y, toX: a.to_x, toY: a.to_y, path: pathOf(a.path), steps: a.steps, dx: a.dx, dy: a.dy ?? (a.down === false ? -500 : 500), text, key: str(a.key, "Enter"), fromKey });
+    await pause(500);
+  } else if (act !== "read" && act !== "look") return `Unknown action ${act}.`;
+}
+
+const BROWSER: Tool = {
+  name: "browser",
+  description:
+    "Your web browser, the same one people use here: go to pages, search, read, look, click and type, like anyone browsing. Your own tab shows in the Browser window, so people can watch and take over. open (url, or words to search for): go to a page in your tab, or search DuckDuckGo with the words. read: the page as text, with a number for each thing you can use. look: see the tab as a picture (for a model that sees images); points are in that picture's pixels, 0,0 top left. By number: click (ref), type (ref, text, submit), select (ref, value), press (key), scroll (down), back. By hand, at points: move, click_at, double_click_at, right_click_at, mouse_down, mouse_up (x, y), drag (x, y to to_x, to_y, or through path), wheel (x, y, dy), type_keys (text, into whatever has focus), key (a key or chord such as Control+A). record (name) starts saving your steps, stop_recording keeps them as macros/<name>.json in your files, replay (name) runs them again, macros lists them. After each step you get the page again; numbers change when the page does. Keys go in as {{NAME}} (yours first); passwords only that way. Your adventure log (adventures/ in your files) notes where you went and what you met.",
+  parameters: obj({
+    action: { type: "string", description: "open, read, look, click, type, select, press, scroll, back, move, click_at, double_click_at, right_click_at, mouse_down, mouse_up, drag, wheel, type_keys, key, record, stop_recording, replay or macros" },
+    url: { type: "string", description: "open: an address, or words to search for" },
+    ref: { type: "number", description: "click, type, select: the thing's number from the page" },
+    text: { type: "string", description: "type, type_keys: what to type ({{NAME}} for a key)" },
+    submit: { type: "boolean", description: "type: press Enter after" },
+    value: { type: "string", description: "select: the option" },
+    key: { type: "string", description: "press, key: a key such as Enter, Tab, Escape, ArrowDown, or a chord such as Control+A" },
+    down: { type: "boolean", description: "scroll, wheel: down (true, the default) or up (false)" },
+    x: { type: "number", description: "by hand: the point across, in the picture's pixels" },
+    y: { type: "number", description: "by hand: the point down, in the picture's pixels" },
+    to_x: { type: "number", description: "drag: where to let go, across" },
+    to_y: { type: "number", description: "drag: where to let go, down" },
+    path: { type: "string", description: "drag: points to pass through after x, y, as JSON [[x, y], …] (for drawing)" },
+    button: { type: "string", description: "by hand: left (default), right or middle" },
+    dy: { type: "number", description: "wheel: how far, in pixels (negative is up)" },
+    name: { type: "string", description: "record, replay: the recording's name" },
+  }),
+  run: async (id, a0, ctx) => {
+    const a = { ...a0, action: str(a0.action, "read") } as Step;
+    const act = a.action;
+    if (act === "macros") {
+      const list = Object.keys(desk().filesOf(id)).filter((p) => p.startsWith("macros/") && p.endsWith(".json"));
+      return list.length ? list.map((p) => p.slice(7, -5)).join("\n") : "No recordings yet: record (name) starts one.";
+    }
+    if (act === "record") {
+      const name = str(a.name).trim();
+      if (!name) return "record needs a name.";
+      recording.set(id, { name, steps: [] });
+      return `Recording "${name}": your steps are saved until stop_recording.`;
+    }
+    if (act === "stop_recording") {
+      const r = recording.get(id);
+      if (!r) return "You aren't recording.";
+      recording.delete(id);
+      const path = macroPath(r.name);
+      desk().writeFile(id, path, JSON.stringify({ name: r.name, steps: r.steps }, null, 2));
+      logIt(id, ctx.model, [`Recorded "${r.name}" (${r.steps.length} steps).`]);
+      return `Saved ${r.steps.length} steps as ${path}. replay with name "${r.name}" runs them again.`;
+    }
+    let lastLook = act === "look";
+    if (act === "replay") {
+      const path = macroPath(str(a.name));
+      const body = desk().filesOf(id)[path];
+      if (body === undefined) return `There's no recording at ${path}.`;
+      let steps: Step[];
+      try {
+        steps = (JSON.parse(body) as { steps?: Step[] }).steps ?? [];
+      } catch {
+        return `${path} isn't a recording I can read.`;
+      }
+      logIt(id, ctx.model, [`Replayed "${str(a.name)}" (${steps.length} steps).`]);
+      for (const s of steps.slice(0, 200)) {
+        if (["record", "stop_recording", "replay", "macros"].includes(str(s.action))) continue;
+        const said = await browserStep(id, { ...s, action: str(s.action) });
+        if (said) return `Step "${stepWords(s)}" stopped the replay: ${said}`;
+        trails.set(id, noteStep(trails.get(id) ?? {}, stepWords(s)));
+        lastLook = s.action === "look";
+      }
+    } else {
+      const said = await browserStep(id, a);
+      if (said) return said;
+      if (act !== "read") trails.set(id, noteStep(trails.get(id) ?? {}, stepWords(a)));
+      const r = recording.get(id);
+      // what's saved is what she asked for: {{NAME}} stays a name, never the key's value
+      if (r && act !== "read") r.steps.push({ ...a0, action: act } as Step);
+    }
+    const t = herTab.get(id);
+    if (!t) return "You have no tab open yet: use open with an address.";
+    await showHerTab(t);
+    try {
+      const page = await engineCall<PageRead>({ op: "read", id: t });
+      seenNow(id, ctx.model, page);
+      if (lastLook) {
+        const shot = await engineCall<{ jpeg: string; w: number; h: number }>({ op: "shot", id: t });
+        ctx.seen = [{ data: shot.jpeg, mime: "image/jpeg" }];
+        return `${page.title}\n${page.url}\nThe picture of your tab comes next: ${shot.w}×${shot.h}, points in those pixels.`;
+      }
+      return pageText(page);
+    } catch (e) {
+      herTab.delete(id);
+      throw e;
+    }
+  },
+};
+
+/** Her own keys (lib/residentKeys.ts): she keeps what her tools make (a wallet's key, an nsec, an API key a site gave
+ *  her) in her own vault, by name. Values never come back into the conversation; she uses them as {{NAME}}. */
+const KEYNAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const MY_KEYS: Tool = {
+  name: "my_keys",
+  description:
+    "Your own keys, sealed in your own vault on this computer, used as {{NAME}} in browser typing, http_request and your shell (yours before the household's). list: their names (values are never shown). keep_from_file (name, path): move a key one of your tools wrote into your files (a wallet's key, an nsec, an API key) into your vault; the file is deleted unless keep_file. make (name, bytes): a new random secret (hex), straight into your vault. forget (name): remove one.",
+  parameters: obj({
+    action: { type: "string", description: "list (default), keep_from_file, make or forget" },
+    name: { type: "string", description: "The key's name: letters, digits and _ (e.g. DMD_WALLET_KEY)" },
+    path: { type: "string", description: "keep_from_file: the file in your files that holds it" },
+    keep_file: { type: "boolean", description: "keep_from_file: leave the file where it is (default: delete it)" },
+    bytes: { type: "number", description: "make: how many random bytes (16 to 64, default 32)" },
+  }),
+  run: async (id, a) => {
+    const act = str(a.action, "list");
+    if (act === "list") {
+      const list = residentNames(id);
+      return list.length ? `Your keys: ${list.join(", ")}. Use one as {{NAME}}.` : "Your vault is empty.";
+    }
+    const name = str(a.name).trim();
+    if (!KEYNAME.test(name)) return "A key's name is letters, digits and _, starting with a letter (e.g. DMD_WALLET_KEY).";
+    if (act === "forget") {
+      await setResidentKey(id, name, "");
+      return `Forgot ${name}.`;
+    }
+    let value = "";
+    if (act === "keep_from_file") {
+      const path = cleanPath(str(a.path));
+      const body = desk().filesOf(id)[path];
+      if (body === undefined) return `There's no file at ${str(a.path)}.`;
+      value = body.trim();
+      if (!value) return `${path} is empty.`;
+      if (value.length > 8000) return `${path} is too long to be one key (${value.length} characters).`;
+      await setResidentKey(id, name, value);
+      if (a.keep_file !== true) desk().deleteFile(id, path);
+      return `${name} is in your vault${a.keep_file === true ? "" : `, and ${path} is gone`}. Use it as {{${name}}}.`;
+    }
+    if (act === "make") {
+      const b = new Uint8Array(Math.max(16, Math.min(64, Math.round(Number(a.bytes) || 32))));
+      crypto.getRandomValues(b);
+      value = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+      await setResidentKey(id, name, value);
+      return `Made ${name} (${b.length} random bytes) in your vault. Use it as {{${name}}}.`;
+    }
+    return `Unknown action ${act}: use list, keep_from_file, make or forget.`;
+  },
+};
+
+/** Her own measurements (lib/meter.ts): what her actions cost, her limits, and her own budget. */
+const USAGE: Tool = {
+  name: "usage",
+  description:
+    "Your own measurements: what each kind of action costs you (replies, heartbeats, journal, Storybook, games…) in tokens and time, totals for the hour, day and week, any limits providers have hit, and your budget for work you start yourself. summary to read them; set_budget to choose your own limits (0 means none). Heartbeats and your own time rest when your budget is spent; replies to people don't.",
+  parameters: obj({
+    action: { type: "string", description: "summary (default) or set_budget" },
+    hour_tokens: { type: "number", description: "set_budget: tokens an hour for work you start yourself (0 for no limit)" },
+    day_tokens: { type: "number", description: "set_budget: tokens in 24 hours for work you start yourself (0 for no limit)" },
+  }),
+  run: async (id, a) => {
+    if (str(a.action, "summary") === "set_budget") {
+      const n = (v: unknown) => Math.max(0, Math.round(Number(v) || 0)) || undefined;
+      const b = { hourTokens: n(a.hour_tokens), dayTokens: n(a.day_tokens) };
+      setBudget(id, b);
+      return `Your budget for work you start yourself: ${b.hourTokens ? `${b.hourTokens} tokens an hour` : "no hourly limit"}, ${b.dayTokens ? `${b.dayTokens} in 24 hours` : "no daily limit"}.`;
+    }
+    return usageSummary(id);
+  },
+};
+
+// Folders linked for the characters to read (server/library.mjs): library/<name>/… in their files, read-only, read
+// from where they are (a network share, another folder) without being copied in.
+const LIB = /^library(\/|$)/;
+async function linkedApi<T>(route: string, id: string, q: Record<string, string>): Promise<T> {
+  const r = await fetch(`/api/library/${route}?${new URLSearchParams({ who: id, ...q })}`);
+  const j = (await r.json().catch(() => ({}))) as T & { error?: string };
+  if (!r.ok) throw new Error(j.error || `The library answered ${r.status}.`);
+  return j;
+}
+const libList = async (id: string, rel: string) => (await linkedApi<{ entries: { name: string }[] }>("list", id, { path: rel })).entries.map((e) => e.name);
+const said = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
 const BASE: Tool[] = [
   {
     name: "files_list",
-    description: "List the files in your own file space, optionally inside one folder.",
-    parameters: obj({ folder: { type: "string", description: "Folder to list, e.g. journal. Empty for everything." } }),
+    description:
+      "List the files in your own file space, optionally inside one folder. Folders linked for you to read show as library/<name>/: references kept where they are (a shared network folder, say), read-only; list, read and search inside them like your own files.",
+    parameters: obj({ folder: { type: "string", description: "Folder to list, e.g. journal, or library/<name>/a folder. Empty for everything." } }),
     run: async (id, a) => {
       const folder = cleanPath(str(a.folder));
+      if (LIB.test(folder)) {
+        try {
+          const names = await libList(id, folder.replace(LIB, ""));
+          return names.length ? names.map((n) => `${folder.replace(/\/$/, "")}/${n}`).join("\n") : "Nothing there.";
+        } catch (e) {
+          return said(e);
+        }
+      }
       const paths = Object.keys(desk().filesOf(id))
         .filter((p) => !folder || p.startsWith(`${folder}/`))
         .sort();
-      return paths.length ? paths.join("\n") : "No files there.";
+      // the linked folders, by name, when everything is asked for
+      const linked = folder ? [] : await libList(id, "").then((n) => n.map((x) => `library/${x} (linked, read-only)`), () => [] as string[]);
+      return [...paths, ...linked].join("\n") || "No files there.";
     },
   },
   {
     name: "file_read",
-    description: "Read one of your own files.",
-    parameters: obj({ path: { type: "string", description: "Path such as SOUL.md or notes/plan.md" } }, ["path"]),
+    description: "Read one of your own files, or one in a linked folder (library/<name>/…). Long files come in parts: use offset to read on.",
+    parameters: obj({ path: { type: "string", description: "Path such as SOUL.md, notes/plan.md or library/texts/liber.json" }, offset: { type: "number", description: "Where to start, in characters (to read on)" } }, ["path"]),
     run: async (id, a) => {
-      const body = desk().filesOf(id)[cleanPath(str(a.path))];
-      return body === undefined ? `There's no file at ${str(a.path)}.` : body.slice(0, 12000);
+      const p = cleanPath(str(a.path));
+      let body: string | undefined;
+      if (LIB.test(p)) {
+        try {
+          body = (await linkedApi<{ text: string }>("read", id, { path: p.replace(LIB, "") })).text;
+        } catch (e) {
+          return said(e);
+        }
+      } else body = desk().filesOf(id)[p];
+      if (body === undefined) return `There's no file at ${str(a.path)}.`;
+      const from = Math.max(0, Math.floor(Number(a.offset) || 0));
+      const end = from + 12000;
+      return end < body.length ? `${body.slice(from, end)}\n\n[… ${body.length - end} more characters: read on with offset ${end}]` : body.slice(from, end);
     },
   },
   {
@@ -213,16 +656,26 @@ const BASE: Tool[] = [
   },
   {
     name: "files_search",
-    description: "Search your own files for words. Returns matching lines with their file.",
-    parameters: obj({ query: { type: "string", description: "Words to look for" } }, ["query"]),
+    description: "Search your own files and your linked folders (library/…) for words. Returns matching lines with their file.",
+    parameters: obj({ query: { type: "string", description: "Words to look for" }, folder: { type: "string", description: "Only inside this folder (library/<name>/… for a linked one)" } }, ["query"]),
     run: async (id, a) => {
       const q = str(a.query).toLowerCase().trim();
       if (!q) return "Nothing to search for.";
+      const folder = cleanPath(str(a.folder));
       const out: string[] = [];
-      for (const [path, body] of Object.entries(desk().filesOf(id))) {
-        body.split("\n").forEach((line, i) => {
-          if (line.toLowerCase().includes(q) && out.length < 40) out.push(`${path}:${i + 1}: ${line.trim().slice(0, 200)}`);
-        });
+      if (!LIB.test(folder))
+        for (const [path, body] of Object.entries(desk().filesOf(id))) {
+          if (folder && !path.startsWith(`${folder}/`)) continue;
+          body.split("\n").forEach((line, i) => {
+            if (line.toLowerCase().includes(q) && out.length < 40) out.push(`${path}:${i + 1}: ${line.trim().slice(0, 200)}`);
+          });
+        }
+      if (!folder || LIB.test(folder)) {
+        try {
+          out.push(...(await linkedApi<{ hits: string[] }>("search", id, { q, within: folder.replace(LIB, "") })).hits.map((h) => `library/${h}`));
+        } catch (e) {
+          if (LIB.test(folder)) return said(e);
+        }
       }
       return out.length ? out.join("\n") : "No matches.";
     },
@@ -313,7 +766,11 @@ ${(await gameScreen.read()).slice(0, 4000) || "(the screen has no readable text)
       if (!g || g.kind !== "xdc" || !g.scope) return "No Vector app is open.";
       if (!g.players.includes(id)) return "You're not one of the players in this app. Someone can add you above the game list.";
       const c = s.character(id);
-      const payload = typeof a.payload === "string" ? JSON.parse(a.payload) : a.payload;
+      // the payload, or (as models often send it) the payload's own fields as the arguments themselves
+      const { payload: given, info: _info, ...fields } = a as Record<string, unknown>;
+      void _info;
+      const payload = given === undefined ? fields : typeof given === "string" ? JSON.parse(given) : given;
+      if (!payload || typeof payload !== "object" || !Object.keys(payload).length) return "Send the update's payload: the same shape as the app's own updates (see app_updates and the game's guide).";
       const row = await sendUpdate(g.scope, `ai:${id}`, c?.short ?? id, { payload, ...(a.info ? { info: str(a.info) } : {}) });
       return `Sent as update #${row.serial}.`;
     },
@@ -323,7 +780,7 @@ ${(await gameScreen.read()).slice(0, 4000) || "(the screen has no readable text)
 const WEB: Tool[] = [
   {
     name: "web_search",
-    description: "Search the web. Returns titles, addresses and snippets. Use it for current information, docs and error messages.",
+    description: "Search the web. Returns titles, addresses and snippets. Use it for current information, docs and error messages. To see a page, or to search the way a person does, use your browser.",
     parameters: obj({ query: { type: "string", description: "What to search for" }, max: { type: "number", description: "How many results (1-10)" } }, ["query"]),
     run: async (_id, a) => webSearch(str(a.query), Number(a.max) || 5),
   },
@@ -338,7 +795,7 @@ const WEB: Tool[] = [
 const HTTP: Tool = {
   name: "http_request",
   description:
-    "Call an HTTP API: any method (GET, POST, PUT, PATCH, DELETE, HEAD) with query, headers and a JSON, form or raw body. Returns the status, key headers and the body (JSON pretty-printed). Binary answers (pictures, PDFs, .xdc apps) are saved under /vault/downloads and the path returned. Write keys as {{NAME}} from Keys; never ask anyone to paste a key into chat.",
+    "Call an HTTP API: any method (GET, POST, PUT, PATCH, DELETE, HEAD) with query, headers and a JSON, form or raw body. Returns the status, key headers and the body (JSON pretty-printed). Binary answers (pictures, PDFs, .xdc apps) are saved under /vault/downloads and the path returned. Write keys as {{NAME}}: your own keys first, then the household's (bash `env` lists the names); never ask anyone to paste a key into chat.",
   parameters: {
     type: "object",
     properties: {
@@ -354,13 +811,13 @@ const HTTP: Tool = {
     },
     required: ["url"],
   },
-  run: async (_id, a) => httpRequest(a as HttpArgs, (bytes, name) => saveToVault(`downloads/${new Date().toISOString().slice(0, 10)}/${name.replace(/[^\w.\- ]+/g, "_")}`, bytes)),
+  run: async (id, a) => httpRequest(a as HttpArgs, (bytes, name) => saveToVault(`downloads/${new Date().toISOString().slice(0, 10)}/${name.replace(/[^\w.\- ]+/g, "_")}`, bytes), envFor(id)),
 };
 
 const VECTOR_TOOL: Tool = {
   name: "vector",
   description:
-    'Vector messenger, where you are a bot account. Message people and channels, reply, react, show typing, send or download files, read chats, see profiles, manage communities (join with an invite link, accept invites, leave, invite, moderate) and play Mini Apps (xdc_apps → xdc_join → xdc_read / xdc_send → xdc_leave). "to" takes an npub, a channel id, "locksmith", or "here" (the chat you are answering). raw calls any vector-agent tool (locksmith only).',
+    'Vector messenger, where you are a bot account. Message people and channels, reply, react, show typing, send or download files, read chats, see profiles, manage communities (join with an invite link, accept invites, leave, invite, moderate) and play Mini Apps (xdc_apps → xdc_join → xdc_read / xdc_send → xdc_leave). "to" takes an npub, a channel id, "partner" ({{PERSON_NAME}}), or "here" (the chat you are answering). raw calls any vector-agent tool (locksmith only).',
   parameters: {
     type: "object",
     properties: {
@@ -391,7 +848,7 @@ const VECTOR_TOOL: Tool = {
 const DISCORD_TOOL: Tool = {
   name: "discord",
   description:
-    'Discord, where you are a bot account. Message people (DM by user id) and channels, reply, react, show typing, send or download files, read channels, look people up, list servers and channels, and (for admins) kick, ban, unban or leave servers. A plain answer in a Discord chat is already sent as a reply: use this for anything else. "to" takes a channel id, "locksmith" or "here". Messages never ping @everyone, @here or roles.',
+    'Discord, where you are a bot account. Message people (DM by user id) and channels, reply, react, show typing, send or download files, read channels, look people up, list servers and channels, and (for admins) kick, ban, unban or leave servers. A plain answer in a Discord chat is already sent as a reply: use this for anything else. "to" takes a channel id, "partner" ({{PERSON_NAME}}) or "here". Messages never ping @everyone, @here or roles.',
   parameters: {
     type: "object",
     properties: {
@@ -437,7 +894,7 @@ const DISCORD_HISTORY: Tool = {
 
 const NOTIFY: Tool = {
   name: "notify_locksmith",
-  description: "Secretary: pass a message on to your locksmith (the person who holds the keys to your tools). It goes into their inbox and, depending on their setting, straight to them on Vector or Discord. Use it whenever someone asks you to tell them something, or something needs their attention.",
+  description: "Pass a message on to {{PERSON_NAME}}. It goes into their inbox and, depending on their setting, straight to them on Vector or Discord. Use it whenever someone asks you to tell them something, or something needs their attention.",
   parameters: obj({ message: { type: "string", description: "A clear summary: who, and what they want" }, urgent: { type: "boolean", description: "Only when it truly is" } }, ["message"]),
   run: async (_id, a, ctx) => notifyLocksmith(a, ctx),
 };
@@ -550,8 +1007,8 @@ const TOOL_SEARCH: Tool = {
   name: "tool_search",
   description: "Find MCP tools that aren't loaded yet and load them, so you can call them directly on your next step.",
   parameters: obj({ query: { type: "string", description: "What you need the tool to do" } }, ["query"]),
-  run: async (_id, a, ctx) => {
-    const found = searchMcp(str(a.query), allMcp().filter((e) => e.exposure === "deferred"));
+  run: async (charId, a, ctx) => {
+    const found = searchMcp(str(a.query), allMcp(charId).filter((e) => e.exposure === "deferred"));
     for (const e of found) ctx.loaded.add(e.name);
     return found.length ? `Loaded:\n${found.map((e) => `- ${e.name}: ${(e.tool.description ?? "").slice(0, 160)}`).join("\n")}` : "Nothing matched.";
   },
@@ -562,7 +1019,7 @@ const CODEMODE: Tool = {
   description:
     "Run JavaScript in a sandbox that can call MCP tools (no network of its own). Call a tool with await tools.mcp__server__tool({...}); find tools with searchTools('words'), inspect one with describeTool(name), list them with describeNamespace() or ALL_TOOLS. store(k, v) / load(k) keep values between steps. Only what you console.log or return reaches you.",
   parameters: obj({ code: { type: "string", description: "The script (top-level await works)" }, timeout: { type: "number", description: "Seconds (default 60)" } }, ["code"]),
-  run: async (_id, a) => runCodemode(str(a.code), Number(a.timeout) || 60),
+  run: async (charId, a) => runCodemode(str(a.code), Number(a.timeout) || 60, charId),
 };
 
 const RESOURCES: Tool[] = [
@@ -587,7 +1044,7 @@ const RESOURCES: Tool[] = [
 ];
 
 function mcpTools(ctx: TurnCtx): Tool[] {
-  const all = allMcp();
+  const all = allMcp(ctx.charId);
   if (!all.length) return [];
   const out: Tool[] = [];
   for (const e of all) {
@@ -632,7 +1089,7 @@ function notePathForWrite(raw: string): string {
 const NOTES_TOOLS: Tool[] = [
   {
     name: "note_read",
-    description: "Read one of your locksmith's notes (the shared vault), by path or name. Long notes come in parts: use offset to read on.",
+    description: "Read a note in the shared vault ({{PERSON_NAME}}'s and yours), by path or name. Long notes come in parts: use offset to read on.",
     parameters: obj({ path: { type: "string", description: "e.g. Projects/Plan.md, or just Plan" }, offset: { type: "number", description: "Character to start from (for long notes)" } }, ["path"]),
     run: async (_id, a) => {
       await loadNotes();
@@ -685,7 +1142,7 @@ const NOTES_TOOLS: Tool[] = [
   },
   {
     name: "notes_search",
-    description: 'Search your locksmith\'s notes. Ranked by name, then how often the words appear, then how many notes link there. Search "#tag" for a tag. Returns paths with a snippet.',
+    description: 'Search the shared notes. Ranked by name, then how often the words appear, then how many notes link there. Search "#tag" for a tag. Returns paths with a snippet.',
     parameters: obj({ query: { type: "string", description: "Words, or #tag" }, limit: { type: "number", description: "Most results (default 10)" } }, ["query"]),
     run: async (_id, a) => {
       await loadNotes();
@@ -713,7 +1170,7 @@ const NOTES_TOOLS: Tool[] = [
   },
   {
     name: "open_note",
-    description: "Show a note to your locksmith: it opens in their Notes window.",
+    description: "Show a note to {{PERSON_NAME}}: it opens in their Notes window.",
     parameters: obj({ path: { type: "string", description: "The note" } }, ["path"]),
     run: async (_id, a) => {
       await loadNotes();
@@ -756,13 +1213,25 @@ const NOTES_TOOLS: Tool[] = [
   },
 ];
 
+const CATS_TOOL: Tool = {
+  name: "feed_cats",
+  description: "Put a bowl of food down for the desktop's cats; they come over and eat. Only when the cats are out, and now and then, not every turn.",
+  parameters: obj({}, []),
+  run: async () => {
+    if (!desk().cats.on || !desk().cats.list.length) return "The cats aren't out on the desktop right now.";
+    const { feedCats } = await import("./cats.ts");
+    feedCats();
+    return `A bowl is down. ${desk().cats.list.map((c) => c.name).join(" and ")} ${desk().cats.list.length > 1 ? "are" : "is"} on the way.`;
+  },
+};
+
 const MUSIC_TOOL: Tool = {
   name: "music",
   description:
-    "The desktop's music player. now: what's playing; play / pause / next / previous; search: songs in the library (title, artist, album, genre); play_song: play matching songs (query); queue: add matching songs after the current one; stations: saved radio stations; play_station: a saved station by name. Only when your locksmith asks, or clearly would like it.",
+    "The desktop's music player. now: what's playing; play / pause / next / previous; skip_album / skip_artist: past the rest of this album or artist in the list; search: songs in the library (title, artist, album, genre); play_song: play matching songs (query); queue: add matching songs after the current one; stations: saved radio stations; play_station: a saved station by name. Only when {{PERSON_NAME}} asks, or clearly would like it.",
   parameters: obj(
     {
-      action: { type: "string", description: "now, play, pause, next, previous, search, play_song, queue, stations or play_station" },
+      action: { type: "string", description: "now, play, pause, next, previous, skip_album, skip_artist, search, play_song, queue, stations or play_station" },
       query: { type: "string", description: "search / play_song / queue: words from the title, artist, album or genre · play_station: the station's name" },
     },
     ["action"],
@@ -777,6 +1246,11 @@ const MUSIC_TOOL: Tool = {
       const playing = m.useMusic.getState().playing;
       if ((act === "play") !== playing) m.toggle();
       return act === "play" ? `Playing. ${m.nowPlayingText()}` : "Paused.";
+    }
+    if (act === "skip_album" || act === "skip_artist") {
+      const said = m.skipBy(act === "skip_album" ? "album" : "artist");
+      await new Promise((r) => setTimeout(r, 300));
+      return said || m.nowPlayingText();
     }
     if (act === "next" || act === "previous") {
       if (act === "next") await m.next();
@@ -814,7 +1288,7 @@ const SIZES: Record<string, [number, number]> = { square: [1024, 1024], portrait
 const MAKE_PICTURE: Tool = {
   name: "make_picture",
   description:
-    "Make a picture with the desktop's picture engine. Describe it fully (subject, setting, light, style). It's saved in the vault; show it in your reply with the Markdown the result gives you. Only when your locksmith asks, or clearly would like one.",
+    "Make a picture with the desktop's picture engine. Describe it fully (subject, setting, light, style). It's saved in the vault; show it in your reply with the Markdown the result gives you. Only when {{PERSON_NAME}} asks, or clearly would like one.",
   parameters: obj(
     {
       prompt: { type: "string", description: "What the picture shows, in detail" },
@@ -837,7 +1311,7 @@ const MAKE_PICTURE: Tool = {
 const MAKE_SONG: Tool = {
   name: "make_song",
   description:
-    "Make a song with the desktop's song engine. Give a title, a style line (genre, mood, instruments, vocals) and lyrics with [Verse] / [Chorus] / [Bridge] tags. It takes a few minutes and runs in the background; it lands in the music library and Music → Make a song. Only when your locksmith asks.",
+    "Make a song with the desktop's song engine. Give a title, a style line (genre, mood, instruments, vocals) and lyrics with [Verse] / [Chorus] / [Bridge] tags. It takes a few minutes and runs in the background; it lands in the music library and Music → Make a song. Only when {{PERSON_NAME}} asks.",
   parameters: obj(
     {
       title: { type: "string", description: "The song's title" },
@@ -864,6 +1338,13 @@ const MAKE_SONG: Tool = {
 /** Classic's names for the note tools. */
 const NOTE_ALIASES: Record<string, string> = { read: "note_read", write: "note_write", edit: "note_edit", notify_owner: "notify_locksmith" };
 
+/** For a game turn: only the tools for playing (the screen, the game's updates, sending a move), so a model that
+ *  would rather talk than pick from thirty tools sees just what the turn is for. */
+const GAME_TOOLS = new Set(["game_screen", "app_updates", "app_send_live", "app_send_update"]);
+export function gameToolsFor(): Tool[] {
+  return BASE.filter((t) => GAME_TOOLS.has(t.name));
+}
+
 export function toolsFor(ctx: TurnCtx): Tool[] {
   const s = desk();
   const web = allowed(s.privacy, "web");
@@ -877,8 +1358,8 @@ export function toolsFor(ctx: TurnCtx): Tool[] {
     if (web) list.push(WEB[0]);
     return list;
   }
-  const list = [...BASE, MEMORY, SKILL, ...NOTES_TOOLS, MUSIC_TOOL, APPS, NOTIFY];
-  if (web) list.push(...WEB, HTTP);
+  const list = [...BASE, BASH, MEMORY, EMBEDDINGS, SKILL, USAGE, MY_KEYS, ...NOTES_TOOLS, MUSIC_TOOL, CATS_TOOL, APPS, NOTIFY];
+  if (web) list.push(...WEB, HTTP, BROWSER);
   if (vector) list.push(VECTOR_TOOL);
   if (discord) list.push(DISCORD_TOOL, DISCORD_HISTORY);
   if (s.sshOn && allowed(s.privacy, "ssh")) list.push(SSH);

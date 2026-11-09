@@ -1,3 +1,4 @@
+import { toCss, viewH, viewW } from "../lib/zoom.ts";
 import { useRef, type PointerEvent as RPointerEvent, type ReactNode } from "react";
 import { Maximize2, Minimize2, Minus, X } from "lucide-react";
 import { useDesk, type AppId } from "../lib/store.ts";
@@ -30,6 +31,7 @@ export function Window({
   bare?: boolean;
 }) {
   const win = useDesk((s) => s.wins[id]);
+  const inHangout = useDesk((s) => s.hangout && s.hang.windows.includes(id));
   const { focusApp, moveApp, closeApp, minimizeApp, toggleMax } = useDesk.getState();
   const ref = useRef<HTMLDivElement>(null);
 
@@ -43,20 +45,40 @@ export function Window({
     const sy = e.clientY;
     const box = { x: win.x, y: win.y, w: win.w, h: win.h };
     const space = ref.current?.parentElement?.getBoundingClientRect();
-    const maxW = space?.width ?? window.innerWidth;
-    const maxH = space?.height ?? window.innerHeight;
+    const maxW = space ? toCss(space.width) : viewW();
+    const maxH = space ? toCss(space.height) : viewH();
     const el = ref.current;
     let next = { ...box };
+    // While dragging, embedded pages (Vector, games, the browser) ignore the pointer, and the handle holds on to it:
+    // otherwise a page under the pointer swallows the moves and the release, and the window keeps resizing.
+    const handle = e.currentTarget as HTMLElement;
+    try {
+      handle.setPointerCapture(e.pointerId);
+    } catch {
+      /* already released */
+    }
+    document.body.classList.add("dragging-window");
+    // one update per screen frame: a heavy page inside (Vector's app) re-lays itself out on each one
+    let frame = 0;
+    const apply = () => {
+      frame = 0;
+      if (!el) return;
+      el.style.left = `${next.x}px`;
+      el.style.top = `${next.y}px`;
+      el.style.width = `${next.w}px`;
+      el.style.height = `${next.h}px`;
+    };
     const onMove = (ev: PointerEvent) => {
-      const dx = ev.clientX - sx;
-      const dy = ev.clientY - sy;
+      const dx = toCss(ev.clientX - sx);
+      const dy = toCss(ev.clientY - sy);
       next = { ...box };
       if (mode === "move") {
         next.x = Math.min(maxW - 80, Math.max(-box.w + 120, box.x + dx));
         next.y = Math.min(maxH - 36, Math.max(0, box.y + dy));
       } else {
-        if (mode.includes("e")) next.w = Math.max(MIN_W, Math.min(maxW - box.x, box.w + dx));
-        if (mode.includes("s")) next.h = Math.max(MIN_H, Math.min(maxH - box.y, box.h + dy));
+        // a window already past the screen's edge isn't snapped back by the first nudge: it can only grow to the edge
+        if (mode.includes("e")) next.w = Math.max(MIN_W, Math.min(Math.max(maxW - box.x, box.w), box.w + dx));
+        if (mode.includes("s")) next.h = Math.max(MIN_H, Math.min(Math.max(maxH - box.y, box.h), box.h + dy));
         if (mode.includes("w")) {
           const w = Math.max(MIN_W, box.w - dx);
           next.x = box.x + (box.w - w);
@@ -68,29 +90,32 @@ export function Window({
           next.h = h;
         }
       }
-      if (el) {
-        el.style.left = `${next.x}px`;
-        el.style.top = `${next.y}px`;
-        el.style.width = `${next.w}px`;
-        el.style.height = `${next.h}px`;
-      }
+      if (!frame) frame = requestAnimationFrame(apply);
     };
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      handle.removeEventListener("lostpointercapture", onUp);
+      if (frame) cancelAnimationFrame(frame);
+      apply();
       document.body.style.userSelect = "";
+      document.body.classList.remove("dragging-window");
       moveApp(id, next);
     };
     document.body.style.userSelect = "none";
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    handle.addEventListener("lostpointercapture", onUp);
   };
 
   if (!win.open) return null;
   return (
     <div
       ref={ref}
-      className={`win${front ? " front" : ""}${win.min ? " min" : ""}${win.max ? " max" : ""}`}
+      data-win={id}
+      className={`win${front ? " front" : ""}${win.min ? " min" : ""}${win.max ? " max" : ""}${inHangout ? " in-hangout" : ""}`}
       style={{ left: win.x, top: win.y, width: win.w, height: win.h, zIndex: win.z }}
       onPointerDownCapture={() => focusApp(id)}
       role="dialog"

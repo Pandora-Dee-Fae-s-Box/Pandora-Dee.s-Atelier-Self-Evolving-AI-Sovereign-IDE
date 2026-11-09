@@ -1,3 +1,4 @@
+import { toCss } from "../lib/zoom.ts";
 import { useEffect, useRef, useState } from "react";
 import {
   Infinity as InfinityIcon,
@@ -28,7 +29,7 @@ import { stopSpeaking, speak } from "../lib/voice.ts";
 import { MicButton } from "../ui/Mic.tsx";
 import { voiceFor } from "../lib/prefs.ts";
 import { isImage, type Attachment, type Message } from "../lib/room.ts";
-import { chatList, deleteChat, newChat, renameChat, switchChat, titleFrom } from "../lib/chats.ts";
+import { chatList, deleteChat, isUntitled, newChat, renameChat, switchChat, titleFrom } from "../lib/chats.ts";
 import { openMenu, openMenuAt, type MenuItem } from "../ui/ContextMenu.tsx";
 import { characterMenu, messageMenu } from "../ui/menus.ts";
 import { askUser } from "../ui/Ask.tsx";
@@ -37,6 +38,10 @@ import { runSlash, suggest } from "../ui/slash.ts";
 
 import { CharAvatar, Markdown, PersonAvatar, timeOf } from "../ui/common.tsx";
 import { openSettings } from "../ui/desktopApi.tsx";
+import { copyText } from "../lib/clipboard.ts";
+import { askText } from "../ui/Ask.tsx";
+import { takeRoomDraft } from "../lib/sendTo.ts";
+import { RoomTabs } from "../ui/RoomTabs.tsx";
 
 /** The latest character reply that Retry would replace. */
 function retryTarget(messages: Message[]) {
@@ -53,9 +58,9 @@ export function chatMenu(): MenuItem[] {
   const list = chatList();
   const report = (why: string) => why && s.notice(why);
   return [
-    { label: "New chat", hint: "/new", run: () => void newChat().then(report) },
+    { label: "New branch", hint: "/new", run: () => void newChat().then(report) },
     { sep: true },
-    { heading: "Saved chats" },
+    { heading: "Branches" },
     ...list.slice(0, 40).map((c) => ({
       label: `${c.title}${c.count ? ` · ${c.count}` : ""}`,
       checked: c.id === s.chatId,
@@ -63,18 +68,18 @@ export function chatMenu(): MenuItem[] {
     })),
     { sep: true },
     {
-      label: "Rename this chat…",
-      run: () => {
+      label: "Rename this branch…",
+      run: async () => {
         const cur = list.find((c) => c.id === s.chatId);
-        const t = window.prompt("Name this chat", cur?.title ?? "");
+        const t = await askText("Name this branch", cur?.title ?? "");
         if (t) renameChat(s.chatId, t);
       },
     },
     {
-      label: "Delete this chat…",
+      label: "Delete this branch…",
       danger: true,
       run: () =>
-        void askUser("Delete this chat?", "Its messages are removed from this computer. Journals and memories the characters wrote stay.", "Delete", "Keep it").then(
+        void askUser("Delete this branch?", "Its messages are removed from this computer. Journals and memories the characters wrote stay.", "Delete", "Keep it").then(
           (ok) => ok && void deleteChat(desk().chatId).then(report),
         ),
     },
@@ -103,6 +108,16 @@ export function RoomApp() {
   const s = useDesk();
   const room = s.roomCharacters();
   const [draft, setDraft] = useState("");
+  // "Send to → Room" puts things into the typing bar (here when it's open, or when it opens)
+  useEffect(() => {
+    const take = () => {
+      const t = takeRoomDraft();
+      if (t) setDraft((d) => (d ? `${d}\n${t}` : t));
+    };
+    take();
+    window.addEventListener("pdd-room-draft", take);
+    return () => window.removeEventListener("pdd-room-draft", take);
+  }, []);
   const [files, setFiles] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(0);
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
@@ -110,13 +125,24 @@ export function RoomApp() {
   const [dragging, setDragging] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const roomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const atBottom = useRef(true);
+  // The message box: it grows with what's typed (up to 40% of the room), or stays the height its divider was
+  // dragged to (kept per browser; double-click the divider to go back to growing).
+  const [inputH, setInputH] = useState<number | null>(() => {
+    try {
+      return Number(localStorage.getItem("pdd-room-input-h")) || null;
+    } catch {
+      return null;
+    }
+  });
   const busy = Object.keys(s.busy).length > 0;
   const account = s.accounts.find((a) => a.name === s.session);
   const noConnection = !s.model.connections.some((c) => c.enabled);
   const retryId = busy ? null : retryTarget(s.messages);
   const meta = s.chats.find((c) => c.id === s.chatId);
-  const title = meta && meta.title !== "New chat" ? meta.title : titleFrom(s.messages);
+  const title = meta && !isUntitled(meta.title) ? meta.title : titleFrom(s.messages);
   const hints = suggest(draft);
 
   useEffect(() => {
@@ -124,6 +150,49 @@ export function RoomApp() {
     if (el && atBottom.current) el.scrollTop = el.scrollHeight;
   }, [s.messages]);
   useEffect(() => setPick(0), [draft]);
+  useEffect(() => {
+    const ta = inputRef.current;
+    const box = roomRef.current;
+    if (!ta || !box) return;
+    if (inputH) {
+      ta.style.height = `${Math.min(inputH, box.clientHeight * 0.75)}px`;
+      return;
+    }
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(Math.max(ta.scrollHeight + 2, 42), Math.max(42, box.clientHeight * 0.4))}px`;
+  }, [draft, inputH]);
+
+  const dragDivider = (e: React.PointerEvent) => {
+    const ta = inputRef.current;
+    const box = roomRef.current;
+    if (!ta || !box) return;
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = ta.offsetHeight;
+    const size = (y: number) => Math.round(Math.max(42, Math.min(startH + toCss(startY - y), box.clientHeight * 0.75)));
+    const move = (ev: PointerEvent) => setInputH(size(ev.clientY));
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      try {
+        localStorage.setItem("pdd-room-input-h", String(size(ev.clientY)));
+      } catch {
+        /* kept for this visit only */
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  };
+  const autoSize = () => {
+    setInputH(null);
+    try {
+      localStorage.removeItem("pdd-room-input-h");
+    } catch {
+      /* nothing kept */
+    }
+  };
 
   const attach = async (list: FileList | File[]) => {
     const all = [...list];
@@ -159,6 +228,7 @@ export function RoomApp() {
 
   return (
     <div
+      ref={roomRef}
       className={`room${dragging ? " dropping" : ""}`}
       onDragOver={(e) => {
         if (![...e.dataTransfer.types].includes("Files")) return;
@@ -173,12 +243,13 @@ export function RoomApp() {
         void attach(e.dataTransfer.files);
       }}
     >
+      <RoomTabs />
       <div className="room-bar">
-        <button className="chat-title" onClick={(e) => openMenuAt(e.currentTarget, chatMenu())} data-tip="Saved chats: switch, start a new one, rename" aria-label={`Chat: ${title}. Saved chats`}>
+        <button className="chat-title" onClick={(e) => openMenuAt(e.currentTarget, chatMenu())} data-tip="Branches: switch, start a new one, rename" aria-label={`Chat: ${title}. Saved chats`}>
           <span className="t">{title}</span>
           <ChevronDown size={13} />
         </button>
-        <button className="icon-btn" data-tip="New chat (this one is saved)" aria-label="New chat" disabled={busy} onClick={() => void newChat().then((why) => why && desk().notice(why))}>
+        <button className="icon-btn" data-tip="New branch (this one is saved)" aria-label="New branch" disabled={busy} onClick={() => void newChat().then((why) => why && desk().notice(why))}>
           <Plus size={16} />
         </button>
         <span className="bar-sep" />
@@ -298,11 +369,29 @@ export function RoomApp() {
                 </div>
                 {m.tools?.length ? (
                   <div className="tools">
-                    {m.tools.map((t, i) => (
-                      <span key={i} className={t.ok ? "" : "fail"}>
-                        {t.note}
-                      </span>
-                    ))}
+                    {m.tools.map((t, i) =>
+                      t.args === undefined && t.out === undefined ? (
+                        <span key={i} className={t.ok ? "" : "fail"}>
+                          {t.note}
+                        </span>
+                      ) : (
+                        <details key={i} className={`tool-row${t.running ? " running" : t.ok ? " ok" : " fail"}${t.desk ? " desk" : ""}`}>
+                          <summary>
+                            <span className="mark">{t.running ? "…" : t.desk ? "!" : t.ok ? "✓" : "✗"}</span>
+                            {t.note}
+                            {t.ms !== undefined ? <span className="faint"> · {t.ms < 1000 ? `${t.ms} ms` : `${(t.ms / 1000).toFixed(1)} s`}</span> : null}
+                          </summary>
+                          {t.args && t.args !== "{}" ? (
+                            <>
+                              <div className="tool-label">Sent</div>
+                              <pre>{t.args}</pre>
+                            </>
+                          ) : null}
+                          <div className="tool-label">{t.desk ? "The desk's note" : "Came back"}</div>
+                          {t.out !== undefined ? <pre>{t.out || "(nothing)"}</pre> : <div className="faint small">Running…</div>}
+                        </details>
+                      ),
+                    )}
                   </div>
                 ) : null}
                 {c && m.thinking && s.chat.thinking !== "hidden" ? (
@@ -356,7 +445,7 @@ export function RoomApp() {
                 {m.files?.length ? <Files files={m.files} /> : null}
                 {c && text ? (
                   <div className={`msg-actions${m.rating ? " rated" : ""}`}>
-                    <button onClick={() => navigator.clipboard?.writeText(text)} title="Copy">
+                    <button onClick={() => copyText(text)} title="Copy">
                       <Copy size={12} /> Copy
                     </button>
                     <button
@@ -393,7 +482,7 @@ export function RoomApp() {
                 ) : null}
                 {mine && editing?.id !== m.id ? (
                   <div className="msg-actions">
-                    <button onClick={() => navigator.clipboard?.writeText(m.text)} title="Copy">
+                    <button onClick={() => copyText(m.text)} title="Copy">
                       <Copy size={12} /> Copy
                     </button>
                     <button disabled={busy} onClick={() => setEditing({ id: m.id, text: m.text })} title="Change it and send it again">
@@ -439,6 +528,16 @@ export function RoomApp() {
           {uploading ? <span className="small faint">Adding {uploading}…</span> : null}
         </div>
       ) : null}
+      <div
+        className="room-divider"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Message box size"
+        onPointerDown={dragDivider}
+        onDoubleClick={autoSize}
+        data-tip-up=""
+        data-tip={inputH ? "Drag to resize the message box; double-click to let it grow with what you type" : "Drag to make the message box taller or shorter"}
+      />
       <div className="composer">
         <button className="icon-btn" data-tip-up="" data-tip="Attach files or pictures (or paste, or drop them here)" aria-label="Attach files" onClick={() => fileRef.current?.click()}>
           <Paperclip size={16} />
@@ -454,6 +553,8 @@ export function RoomApp() {
           }}
         />
         <textarea
+          ref={inputRef}
+          className={inputH ? "fixed" : ""}
           value={draft}
           placeholder={room.length ? `Talk to ${s.character(s.focus)?.short ?? "the room"}, or name someone… (/ for commands)` : "Invite someone first"}
           onChange={(e) => setDraft(e.target.value)}

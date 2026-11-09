@@ -146,12 +146,23 @@ webxdc apps as peers, rebindable shortcuts, right-click menus, movable dock.
 
 ## Classic, enhanced builds
 
-Classic also offers each original app with the other one's features added: **Pandora Dee 2.9.9.2-enhanced**
-and **Jade Vault 2.20.1-enhanced** (pick them in Classic's corner switcher or Settings → Classic; Jade Vault
-2.20.1 as released and the earlier 2.18.2 and 2.18.2-enhanced builds are there too). Every feature
+Classic also offers each original app with the other one's features added: **Pandora Dee 2.9.9.2-jv2.22.1-enhanced**
+and **Jade Vault 2.22.1-enhanced** (pick them in Classic's corner switcher or Settings → Classic; Jade Vault
+2.22.1 as released, and the earlier 2.20.1, 2.20.1-enhanced, 2.18.2 and 2.18.2-enhanced builds are there too). Every feature
 an enhanced build adds is **off until you turn it on** in that app's Config, so with nothing switched on each
 behaves like the original it is built from. They are built from the upstream sources with patches and a script
-kept outside this repo (`F:\pandora-work\classic-enhanced\`: `build.sh --install`, patches in `patches/`).
+kept outside this repo (a separate `classic-enhanced` folder: `build.sh --install`, patches in `patches/`).
+
+**Pandora Dee 2.10.2** and **Jade Vault 2.25.0-enhanced** are the newest, and the defaults (2.10.2 adds her first notes in her own voice, and a Where I Am note, to 2.10.1). They're built from the
+AETHER-ENGINEERS forks' main branches (`scripts/build-web.sh`, then `dist/pandora-dee.html` and `dist/jade-vault.html`).
+Both add the People layer (names, not ranks), the Vault Tree (a new chat is a new branch), the context guard's
+"exceeded max context length by N tokens" fix and the Storybook (Config → Memory, off until switched on). Pandora
+2.10.1 also starts new installs from the clean stock SOUL; Jade 2.25.0-enhanced carries Lucky's 2.23.0–2.25.0.
+
+**Pandora Dee 2.9.9.2-jv2.22.1-enhanced** is the same build carried forward to Jade Vault 2.22.1: Jade's 2.21–2.22.1
+additions are in (the onnx tool sits under the local-models switch with look and litert; the usb tool has its own
+switch; both start off), while Pandora keeps her own way of saving settings in IndexedDB. The earlier
+2.9.9.2-enhanced, described next, stays in Classic.
 
 **Pandora Dee 2.9.9.2-enhanced** = Pandora Dee 2.9.9.2 + everything Jade Vault 2.20.1 adds, merged from both
 apps' sources and given Pandora's words (/Pandora paths, rituals, leaves). Jade's 2.18.3–2.20.1 improvements
@@ -180,8 +191,11 @@ Unlike Jade Vault, each tool has its own switch (there the senses switch also to
 others with it). "Ask me before Pandora places a call, sends a text…" stays on: it is the safety check for those
 tools, which are themselves off. Not included: the Jade Docs webxdc app (a separate app, not part of the page).
 
-**Jade Vault 2.20.1-enhanced** = Jade Vault 2.20.1 + Pandora Dee 2.9.9.2's extras, in Jade's words (the same
-extras as 2.18.2-enhanced, rebased onto the new code):
+**Jade Vault 2.22.1-enhanced** = Jade Vault 2.22.1 + Pandora Dee 2.9.9.2's extras, in Jade's words (the same
+extras as 2.20.1-enhanced, rebased onto the new code). 2.22.1 is upstream's 2.21–2.22.1 (the Jade Fleet client,
+WebGPU on phones with TensorFlow.js, LiteRT and ONNX Runtime, the onnx and usb tools, the offline terminal, settings
+kept in IndexedDB so nothing is lost on reload) merged with this project's own Jade Vault changes (the Chalice
+Discord archive, quota failover, the persona). The extras:
 
 | Added from Pandora Dee | Where to turn it on (Config) |
 | --- | --- |

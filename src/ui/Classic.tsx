@@ -1,12 +1,15 @@
-import { useEffect, useState } from "react";
+import { toCss, viewH } from "../lib/zoom.ts";
+import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, MonitorPlay } from "lucide-react";
 import { desk, useDesk, type ClassicApp } from "../lib/store.ts";
-import { outbound } from "../lib/outbound.ts";
+import { outbound, relayAfterBlock, relaysFor, safeToResend } from "../lib/outbound.ts";
 
 type Build = { version: string; file: string };
 
-/** Classic pages call this (their fetch is hooked as the desktop serves them) to send outside requests. */
-async function classicFetch(url: string, input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+/** Classic pages call this (their fetch is hooked as the desktop serves them) to send outside requests.
+ *  `blocked`: the page sent it itself (the browser route) and was refused, so the relay sends it instead, when
+ *  that can't send it twice. */
+async function classicFetch(url: string, input: RequestInfo | URL, init: RequestInit = {}, blocked = false): Promise<Response> {
   // (the page's objects come from its own window, so instanceof can't be trusted: check their tags)
   const tag = (x: unknown) => Object.prototype.toString.call(x);
   const req = tag(input) === "[object Request]" ? (input as Request) : null;
@@ -26,10 +29,23 @@ async function classicFetch(url: string, input: RequestInfo | URL, init: Request
     const blob = raw as Blob;
     body = new Uint8Array(await blob.arrayBuffer());
     if (blob.type) headers["content-type"] ??= blob.type;
-  } else if (raw != null) return fetch(input, init); // FormData and streams go the browser's way
-  return outbound(url, { method, headers, body, signal: init.signal ?? req?.signal ?? undefined }, desk().classicVia);
+  } else if (raw != null) {
+    if (blocked) throw new TypeError("Failed to fetch"); // FormData and streams can't go by the relay
+    return fetch(input, init); // FormData and streams go the browser's way
+  }
+  const out = { method, headers, body, signal: init.signal ?? req?.signal ?? undefined };
+  if (blocked) {
+    if (!safeToResend(out)) throw new TypeError(`Failed to fetch (${new URL(url).host} may be blocking pages, and this request may already have arrived, so it wasn't sent again)`);
+    return relayAfterBlock(url, out);
+  }
+  return outbound(url, out, relaysFor(url) ? "desktop" : desk().classicVia);
 }
-(window as unknown as { __pddRelay: unknown }).__pddRelay = { via: () => desk().classicVia, fetch: classicFetch };
+(window as unknown as { __pddRelay: unknown }).__pddRelay = {
+  // a site that already blocked the page this session goes by the relay
+  via: (url?: string) => (url && relaysFor(url) ? "desktop" : desk().classicVia),
+  fetch: classicFetch,
+  afterBlock: (url: string, input: RequestInfo | URL, init?: RequestInit) => classicFetch(url, input, init, true),
+};
 type Index = Record<ClassicApp, Build[]>;
 
 const LABEL: Record<ClassicApp, string> = { pandora: "Pandora Dee", jade: "Jade Vault" };
@@ -40,6 +56,41 @@ export function Classic() {
   const versions = useDesk((s) => s.classicVersion);
   const [index, setIndex] = useState<Index | null>(null);
   const [open, setOpen] = useState(false);
+  // how far up the right edge the switcher sits (dragged out of the page's way; kept per browser)
+  const [lift, setLift] = useState(() => {
+    try {
+      return Number(localStorage.getItem("pdd-classic-lift")) || 0;
+    } catch {
+      return 0;
+    }
+  });
+  const dragged = useRef(false);
+  const fit = (n: number) => Math.max(0, Math.min(n, viewH() - 60));
+  // Hold and slide the round button up or down; a tap without sliding opens or closes the options.
+  const slide = (e: React.PointerEvent) => {
+    const startY = e.clientY;
+    const from = lift;
+    dragged.current = false;
+    const move = (ev: PointerEvent) => {
+      if (!dragged.current && Math.abs(ev.clientY - startY) < 8) return;
+      dragged.current = true;
+      setLift(fit(from + toCss(startY - ev.clientY)));
+    };
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      if (!dragged.current) return;
+      try {
+        localStorage.setItem("pdd-classic-lift", String(fit(from + toCss(startY - ev.clientY))));
+      } catch {
+        /* not kept in a private window: fine */
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  };
 
   useEffect(() => {
     fetch("/classic/index.json")
@@ -71,8 +122,21 @@ export function Classic() {
       ) : (
         <div className="empty">No {LABEL[app]} build is installed.</div>
       )}
-      <div className={`classic-switch${open ? " open" : ""}`} onPointerEnter={() => setOpen(true)} onPointerLeave={() => setOpen(false)}>
-        <button className="classic-handle" onClick={() => setOpen(!open)} aria-expanded={open} aria-label="Classic options" data-tip="Classic options">
+      <div
+        className={`classic-switch${open ? " open" : ""}`}
+        style={{ bottom: 10 + fit(lift) }}
+        // a mouse opens it by pointing at it; on touch screens a tap opens and closes it (pointing doesn't exist there)
+        onPointerEnter={(e) => e.pointerType === "mouse" && setOpen(true)}
+        onPointerLeave={(e) => e.pointerType === "mouse" && setOpen(false)}
+      >
+        <button
+          className="classic-handle"
+          onPointerDown={slide}
+          onClick={() => (dragged.current ? (dragged.current = false) : setOpen(!open))}
+          aria-expanded={open}
+          aria-label="Classic options"
+          data-tip="Classic options (slide it up or down to move it)"
+        >
           <MonitorPlay size={16} />
         </button>
         {open ? (

@@ -1,6 +1,7 @@
+import { toCss, viewH, viewW } from "../lib/zoom.ts";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { GripVertical, MonitorPlay, Trees } from "lucide-react";
-import { APPS, desk, useDesk, type AppId, type DockPrefs } from "../lib/store.ts";
+import { GripVertical, Menu, MonitorPlay, Trees } from "lucide-react";
+import { APPS, desk, inToddler, useDesk, type AppId, type DockPrefs } from "../lib/store.ts";
 import { ICONS, openSettings } from "./desktopApi.tsx";
 import { openMenu, type MenuItem } from "./ContextMenu.tsx";
 
@@ -22,9 +23,13 @@ function labelOf(id: string) {
 }
 
 /** The app bar: on any edge, optionally hidden until called, with the apps you choose. */
-export function Dock({ front }: { front?: AppId }) {
+export function Dock({ front, phone, menus }: { front?: AppId; phone?: boolean; menus?: (el: Element) => void }) {
   const wins = useDesk((s) => s.wins);
-  const d = useDesk((s) => s.dock);
+  const saved = useDesk((s) => s.dock);
+  // A phone's dock sits along the bottom or the top: its sides are where swiping means "back", and a floating dock
+  // would cover the full-screen window. A dock put on a side or floating (on a bigger screen) shows at the bottom there.
+  const d: DockPrefs = phone && saved.edge !== "top" ? { ...saved, edge: "bottom" } : saved;
+  const toddler = useDesk((s) => s.toddler);
   const swipe = useDesk((s) => s.touch.edgeSwipe);
   const [shown, setShown] = useState(!d.autoHide);
   const [dragEdge, setDragEdge] = useState<Edge | null>(null);
@@ -32,7 +37,8 @@ export function Dock({ front }: { front?: AppId }) {
   const [drag, setDrag] = useState<{ x: number; y: number } | null>(null);
   const nav = useRef<HTMLElement>(null);
   const hideTimer = useRef(0);
-  const floating = d.edge === "float" || Boolean(drag);
+  // on a phone the dock stays a row while it's dragged; the dashed target shows where it will land
+  const floating = !phone && (d.edge === "float" || Boolean(drag));
   const vertical = floating ? Boolean(d.float?.vertical) : d.edge === "left" || d.edge === "right";
   const autoHide = d.autoHide && d.edge !== "float";
 
@@ -45,9 +51,9 @@ export function Dock({ front }: { front?: AppId }) {
       const r = nav.current?.getBoundingClientRect();
       const f = desk().dock.float;
       if (!r || !f) return;
-      const x = Math.max(4, Math.min(f.x, window.innerWidth - r.width - 4));
+      const x = Math.max(4, Math.min(f.x, viewW() - toCss(r.width) - 4));
       const { top, bottom } = room();
-      const y = Math.max(top, Math.min(f.y, bottom - r.height));
+      const y = Math.max(toCss(top), Math.min(f.y, toCss(bottom - r.height)));
       if (x !== f.x || y !== f.y) desk().set({ dock: { ...desk().dock, float: { ...f, x, y } } });
     };
     fit();
@@ -86,15 +92,16 @@ export function Dock({ front }: { front?: AppId }) {
     let moved = false;
     const SNAP = 48;
     const edgeNear = (x: number, y: number): Edge | null => {
-      const dist = { left: x, right: window.innerWidth - x, top: y, bottom: window.innerHeight - y };
+      const dist = phone ? { top: y, bottom: window.innerHeight - y } : { left: x, right: window.innerWidth - x, top: y, bottom: window.innerHeight - y };
       const [edge, gap] = Object.entries(dist).sort((a, b) => a[1] - b[1])[0];
-      return gap <= SNAP ? (edge as Edge) : null;
+      // a phone's dock always lands on the nearest edge
+      return gap <= SNAP || phone ? (edge as Edge) : null;
     };
     // on touch screens, clear of the side edges (swiping there is "back" on phones with gestures)
     const side = window.matchMedia("(pointer: coarse)").matches ? 28 : 4;
     const place = (ev: PointerEvent) => ({
-      x: Math.max(side, Math.min(ev.clientX - dx, window.innerWidth - r.width - side)),
-      y: Math.max(room().top, Math.min(ev.clientY - dy, room().bottom - r.height)),
+      x: toCss(Math.max(side, Math.min(ev.clientX - dx, window.innerWidth - r.width - side))),
+      y: toCss(Math.max(room().top, Math.min(ev.clientY - dy, room().bottom - r.height))),
     });
     const move = (ev: PointerEvent) => {
       if (!moved && Math.abs(ev.clientX - startX) + Math.abs(ev.clientY - startY) < 4) return;
@@ -116,8 +123,8 @@ export function Dock({ front }: { front?: AppId }) {
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   };
-  const at = drag ?? (d.edge === "float" ? d.float : undefined);
-  const upTips = d.edge === "bottom" || (floating && (at?.y ?? 0) > window.innerHeight / 2);
+  const at = phone ? undefined : drag ?? (d.edge === "float" ? d.float : undefined);
+  const upTips = d.edge === "bottom" || (floating && (at?.y ?? 0) > viewH() / 2);
 
   const icon = Math.round(d.size * 0.46);
   const button = (id: string, i: number): ReactNode => {
@@ -163,7 +170,12 @@ export function Dock({ front }: { front?: AppId }) {
         <span className="dock-grip" onPointerDown={grip} title="Drag to move the dock anywhere; let go near an edge to dock it there" aria-hidden="true">
           <GripVertical size={14} />
         </span>
-        {d.items.map(button)}
+        {menus ? (
+          <button className="dock-menus" style={{ width: d.size, height: d.size }} onClick={(e) => menus(e.currentTarget)} data-tip="Menus" aria-label="Menus" aria-haspopup="menu">
+            <Menu size={Math.round(d.size * 0.5)} />
+          </button>
+        ) : null}
+        {d.items.map((id, i) => (toddler && id !== "|" && !inToddler(id) ? null : button(id, i)))}
       </nav>
       {dragEdge ? <div className={`dock-target ${dragEdge}`} /> : null}
     </>
@@ -181,7 +193,7 @@ function dockMenu(conceal: () => void): MenuItem[] {
     {
       label: "Floating (drag it anywhere)",
       checked: d.edge === "float",
-      run: () => set({ edge: "float", float: d.float ?? { x: Math.max(4, window.innerWidth / 2 - 200), y: Math.max(40, window.innerHeight - 140), vertical: false } }),
+      run: () => set({ edge: "float", float: d.float ?? { x: Math.max(4, viewW() / 2 - 200), y: Math.max(40, viewH() - 140), vertical: false } }),
     },
     ...(d.edge === "float" ? [{ label: "Upright", checked: Boolean(d.float?.vertical), run: () => set({ float: { x: d.float?.x ?? 40, y: d.float?.y ?? 40, vertical: !d.float?.vertical } }) } as MenuItem] : []),
     { sep: true },

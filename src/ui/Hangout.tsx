@@ -1,8 +1,9 @@
+import { poseItems, snapPictures } from "../lib/poses.ts";
 import { useEffect, useRef, useState } from "react";
 import { FullAvatar } from "./FullAvatar.tsx";
 import { runSlash } from "./slash.ts";
 import { MessagesSquare, Monitor, Send, Square, Settings as SettingsIcon, Users } from "lucide-react";
-import { desk, useDesk } from "../lib/store.ts";
+import { APPS, desk, inToddler, useDesk } from "../lib/store.ts";
 import type { Character } from "../lib/characters.ts";
 import { letThemTalk, say, stopAll } from "../lib/agent.ts";
 import { maskName, maskText } from "../lib/privacy.ts";
@@ -66,6 +67,22 @@ export function Stage({ interactive = true }: { interactive?: boolean }) {
           ...(desk().hangout
             ? [
                 { sep: true as const },
+                // windows over the scene, without leaving Hangout or darkening it
+                { heading: "Windows in Hangout" },
+                ...APPS.filter((a) => a.id !== "welcome" && (!desk().toddler || inToddler(a.id))).map((a) => {
+                  const shown = desk().hang.windows.includes(a.id) && desk().wins[a.id].open && !desk().wins[a.id].min;
+                  return {
+                    label: a.title,
+                    checked: shown,
+                    run: () => {
+                      const h = desk().hang;
+                      if (shown) return desk().set({ hang: { ...h, windows: h.windows.filter((w) => w !== a.id) } });
+                      desk().set({ hang: { ...h, windows: [...h.windows.filter((w) => w !== a.id), a.id] } });
+                      desk().openApp(a.id);
+                    },
+                  };
+                }),
+                { sep: true as const },
                 { heading: "Chat" },
                 { label: "Conversation and typing bar", checked: desk().hang.chat === "full", run: () => desk().set({ hang: { ...desk().hang, chat: "full" as const } }) },
                 { label: "Only the typing bar", checked: desk().hang.chat === "bar", run: () => desk().set({ hang: { ...desk().hang, chat: "bar" as const } }) },
@@ -100,6 +117,11 @@ export function Stage({ interactive = true }: { interactive?: boolean }) {
               const box = ref.current?.getBoundingClientRect();
               openMenu({ clientX: px + (box?.left ?? 0), clientY: py + (box?.top ?? 0), preventDefault() {}, stopPropagation() {} }, [
                 ...characterMenu(c.id),
+                { sep: true },
+                ...poseItems(c.short, () => {
+                  const body = ref.current?.querySelector<HTMLElement>(`[data-char="${CSS.escape(c.id)}"] .sprite-body`);
+                  return body ? snapPictures(body) : Promise.reject(new Error(`${c.short} isn't on the scene.`));
+                }),
                 { sep: true },
                 {
                   label: "Back to their spot",
@@ -191,6 +213,7 @@ function Avatar({
   return (
     <div
       ref={el}
+      data-char={c.id}
       className={`avatar-sprite ${style === "avatar" ? "full-look" : style}${talking ? " speaking" : ""}${focus ? " focus" : ""}${framed ? " framed" : ""}`}
       style={{ left: `${x * 100}%`, top: `${y * 100}%`, height: `${hang.size * 100}vh`, ...(style === "avatar" ? { width: `${hang.size * 75 * ((avatar?.scale ?? 1) > 1 ? avatar!.scale : 1)}vh` } : {}), ["--c" as string]: c.accent }}
       onPointerDown={down}
@@ -304,7 +327,14 @@ export function HangoutMode() {
       <Stage />
       <div className="hang-top">
         <span className="hang-title">{s.roomCharacters().map((c) => c.short).join(" · ") || "Nobody's here yet"}</span>
-        <button className="icon-btn" data-tip="Let them talk" aria-label="Let them talk" disabled={busy} onClick={() => void letThemTalk()}>
+        {/* one button for both: it shows while they're talking, and stops them when pressed again */}
+        <button
+          className={`icon-btn${busy ? " on" : ""}`}
+          data-tip={busy ? "They're talking: press to stop them" : s.freeTalk ? "Let them talk (free talk is on: until the loop breaker stops them)" : "Let them talk (one round; free talk is off)"}
+          aria-label={busy ? "Stop them talking" : "Let them talk"}
+          aria-pressed={busy}
+          onClick={() => (busy ? stopAll() : void letThemTalk())}
+        >
           <MessagesSquare size={17} />
         </button>
         <VolumeControl size={17} />

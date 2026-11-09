@@ -12,13 +12,14 @@ import { readAll } from "../lib/trajectories.ts";
 import { links } from "../lib/connections.ts";
 import { stopSpeaking } from "../lib/voice.ts";
 import { openSettings } from "./desktopApi.tsx";
+import { copyText } from "../lib/clipboard.ts";
 
 export type Command = { name: string; args?: string; help: string };
 
 export const COMMANDS: Command[] = [
   { name: "help", help: "List these commands" },
-  { name: "new", args: "[title]", help: "Start a new chat (this one is saved)" },
-  { name: "chats", help: "List saved chats" },
+  { name: "new", args: "[title]", help: "Start a new branch (this one is saved)" },
+  { name: "chats", help: "List the branches (saved chats)" },
   { name: "open", args: "<number>", help: "Switch to a saved chat from /chats" },
   { name: "rename", args: "<title>", help: "Rename this chat" },
   { name: "clear", help: "Clear this chat's messages" },
@@ -147,7 +148,7 @@ export async function runSlash(raw: string): Promise<boolean> {
         .filter((m) => !m.pass)
         .map((m) => `${m.name}: ${m.text}`)
         .join("\n\n");
-      await navigator.clipboard?.writeText(body);
+      await copyText(body);
       s.say("Conversation copied.");
       return true;
     }

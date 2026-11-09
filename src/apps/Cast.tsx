@@ -11,10 +11,16 @@ import { openMenu } from "../ui/ContextMenu.tsx";
 import { characterMenu } from "../ui/menus.ts";
 
 import { blankCharacter, type Character, type Look } from "../lib/characters.ts";
-import { download, makeBackup } from "../lib/backup.ts";
+import { download, makeBackup, toClassic } from "../lib/backup.ts";
 import { shrinkPicture } from "../lib/secure.ts";
 import { MAX_IN_ROOM } from "../lib/room.ts";
+import { MAX_SECONDS, removeSample, sampleUrl, toSampleWav, uploadSample } from "../lib/voiceSample.ts";
+import { embedder, memoryStatus, rebuildMemory, syncMemory } from "../lib/vecmem.ts";
 import { CharAvatar, Confirm, Seg } from "../ui/common.tsx";
+import { setResidentKey, useResidentKeys } from "../lib/residentKeys.ts";
+import { setBudget, usageSummary } from "../lib/meter.ts";
+import { OWN_DEFAULT } from "../lib/ownTimeCore.ts";
+import { bodyStatus, takeFromBody } from "../lib/bodies.ts";
 import { loadBackupFile } from "../ui/desktopApi.tsx";
 import { useWidth } from "../ui/hooks.ts";
 import { Face } from "./Presence.tsx";
@@ -171,6 +177,13 @@ function Profile({ c, onBack }: { c: Character; onBack: () => void }) {
             <button className="btn" onClick={() => download(`${c.id}-backup.json`, makeBackup(c, files))}>
               <Download size={14} /> Save backup
             </button>
+            <button
+              className="btn"
+              title="A config backup Pandora Dee or Jade Vault opens with Config → Import: her files and her Classic settings, no keys"
+              onClick={() => download(`${c.id}-classic-config.json`, toClassic(c, files, desk().charPrefs[c.id], desk().model.connections))}
+            >
+              <Download size={14} /> Export for Classic
+            </button>
           </div>
         </div>
       </div>
@@ -190,7 +203,12 @@ function Profile({ c, onBack }: { c: Character; onBack: () => void }) {
         </div>
         <AvatarEditor c={c} />
         <CharAI c={c} />
+        <CharMemory c={c} />
+        <CharWays c={c} />
         <CharVoice c={c} />
+        <CharKeys c={c} />
+        <CharUsage c={c} />
+        <CharBody c={c} />
         {!c.builtIn ? (
           <>
             <div className="divider" />
@@ -216,6 +234,23 @@ function Profile({ c, onBack }: { c: Character; onBack: () => void }) {
             <div className="field">
               <span>Traits (comma separated)</span>
               <input className="input" value={c.traits.join(", ")} onChange={(e) => desk().updateCharacter(c.id, { traits: e.target.value.split(",").map((t) => t.trim()).filter(Boolean).slice(0, 5) })} />
+            </div>
+            <div className="field">
+              <span>Voiced from outside</span>
+              <label className="check" style={{ padding: 0 }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(c.outside)}
+                  onChange={(e) => desk().updateCharacter(c.id, { outside: e.target.checked ? { by: c.outside?.by || "another program" } : undefined })}
+                />
+                <span>
+                  Someone outside the desktop speaks for {c.short} (another AI or program, through the inbound API with <code>as={c.id}</code>). {c.short} is in the room like
+                  anyone, but never answers on a model here.
+                </span>
+              </label>
+              {c.outside ? (
+                <input className="input" value={c.outside.by} placeholder="Who speaks for them" onChange={(e) => desk().updateCharacter(c.id, { outside: { by: e.target.value } })} aria-label="Who speaks for them" />
+              ) : null}
             </div>
             <div className="row">
               <button className="btn" onClick={() => picRef.current?.click()}>
@@ -545,6 +580,398 @@ function CharAI({ c }: { c: Character }) {
   );
 }
 
+/** What Classic calls her thinking, helpers and heartbeat: her own switches, each falling back to everyone's. */
+function CharWays({ c }: { c: Character }) {
+  const s = useDesk();
+  const p = s.charPrefs[c.id] ?? { look: "talking" as Look };
+  const set = (patch: Partial<CharPrefs>) => desk().setCharPrefs(c.id, patch);
+  const unset = (key: keyof CharPrefs) => {
+    const next = { ...desk().charPrefs[c.id] } as CharPrefs;
+    delete next[key];
+    desk().set({ charPrefs: { ...desk().charPrefs, [c.id]: next } });
+  };
+  const conns = s.model.connections.filter((x) => x.enabled);
+  const hb = p.heartbeat ?? { on: false, everyMin: 30, from: "08:00", to: "22:00", prompt: "" };
+  const setHb = (patch: Partial<typeof hb>) => set({ heartbeat: { ...hb, ...patch } });
+  const own = p.ownTime ?? OWN_DEFAULT;
+  const setOwn = (patch: Partial<typeof own>) => set({ ownTime: { ...own, ...patch } });
+  const hasFile = Boolean((s.filesOf(c.id)["HEARTBEAT.md"] ?? "").trim());
+  const onOff = (v: boolean) => (v ? "on" : "off");
+  return (
+    <>
+      <div className="divider" />
+      <h4>{c.short}'s own way of working</h4>
+      <p className="small muted" style={{ marginTop: 0 }}>
+        As in Classic: whether {c.short} thinks first, what {c.short} does after a chat, what the background work runs on, and a heartbeat. Each one is
+        everyone's setting until it's set here.
+      </p>
+      <Own label="Thinking first" own={p.think !== undefined} shared={onOff(s.chat.askThink)} onReset={() => unset("think")}>
+        <label className="check" style={{ padding: 0 }}>
+          <input type="checkbox" checked={p.think ?? s.chat.askThink} onChange={(e) => set({ think: e.target.checked })} />
+          <span>{c.short} thinks before answering (models that can, on Ollama)</span>
+        </label>
+      </Own>
+      <Own label="After a chat: the journal" own={p.journal !== undefined} shared={onOff(s.chat.autoJournal)} onReset={() => unset("journal")}>
+        <label className="check" style={{ padding: 0 }}>
+          <input type="checkbox" checked={p.journal ?? s.chat.autoJournal} onChange={(e) => set({ journal: e.target.checked })} />
+          <span>{c.short} writes a journal entry about it</span>
+        </label>
+      </Own>
+      <Own label="After a chat: memory" own={p.learn !== undefined} shared={onOff(s.chat.learnFacts)} onReset={() => unset("learn")}>
+        <label className="check" style={{ padding: 0 }}>
+          <input type="checkbox" checked={p.learn ?? s.chat.learnFacts} onChange={(e) => set({ learn: e.target.checked })} />
+          <span>{c.short} keeps what was learned</span>
+        </label>
+      </Own>
+      <Own label="After a chat: the Storybook" own={p.storybook !== undefined} shared={onOff(s.chat.storybook)} onReset={() => unset("storybook")}>
+        <label className="check" style={{ padding: 0 }}>
+          <input type="checkbox" checked={p.storybook ?? s.chat.storybook} onChange={(e) => set({ storybook: e.target.checked })} />
+          <span>{c.short} writes its next scene in their Storybook</span>
+        </label>
+      </Own>
+      <Own label="Helper model (journal, memory, heartbeat)" own={Boolean(p.helper?.connection)} shared={`${c.short}'s own AI`} onReset={() => unset("helper")}>
+        <div className="row" style={{ gap: 6 }}>
+          <select className="select" value={p.helper?.connection ?? ""} onChange={(e) => (e.target.value ? set({ helper: { connection: e.target.value } }) : unset("helper"))}>
+            <option value="">{c.short}'s own AI</option>
+            {conns.map((x) => (
+              <option key={x.id} value={x.id}>
+                {x.label}
+              </option>
+            ))}
+          </select>
+          {p.helper?.connection ? (
+            <input
+              className="input mono grow"
+              value={p.helper.model ?? ""}
+              placeholder={conns.find((x) => x.id === p.helper?.connection)?.model || "that connection's model"}
+              onChange={(e) => set({ helper: { ...p.helper, model: e.target.value.trim() || undefined } })}
+              aria-label="Helper model"
+            />
+          ) : null}
+        </div>
+        <span className="small faint">A smaller, cheaper model can do the background work; {c.short}'s own AI is still tried if it can't be reached.</span>
+      </Own>
+      <div className="field">
+        <span>Heartbeat</span>
+        <label className="check" style={{ padding: 0 }}>
+          <input type="checkbox" checked={hb.on} onChange={(e) => setHb({ on: e.target.checked })} />
+          <span>
+            {c.short} checks in every so often, within these hours, unprompted, and does or says something worth it (or passes). Each check-in is a
+            turn on the AI.
+          </span>
+        </label>
+      </div>
+      {hb.on ? (
+        <>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "end" }}>
+            <label className="field" style={{ maxWidth: 220 }}>
+              <span>Every (minutes)</span>
+              <Num min={5} max={1440} step={5} value={hb.everyMin} onChange={(n) => setHb({ everyMin: n })} />
+            </label>
+            <label className="field" style={{ width: "auto" }}>
+              <span>From</span>
+              <input className="input" type="time" style={{ width: 130 }} value={hb.from} onChange={(e) => setHb({ from: e.target.value })} />
+            </label>
+            <label className="field" style={{ width: "auto" }}>
+              <span>Until</span>
+              <input className="input" type="time" style={{ width: 130 }} value={hb.to} onChange={(e) => setHb({ to: e.target.value })} />
+            </label>
+          </div>
+          <label className="field">
+            <span>What {c.short} is asked each time</span>
+            <textarea
+              className="input"
+              rows={3}
+              value={hb.prompt}
+              placeholder={hasFile ? `Blank: ${c.short}'s HEARTBEAT.md` : "Blank: look at what's open in the journal, memory and notes, and do or say what's worth it"}
+              onChange={(e) => setHb({ prompt: e.target.value })}
+            />
+          </label>
+        </>
+      ) : null}
+      <div className="field">
+        <span>Time of their own</span>
+        <label className="check" style={{ padding: 0 }}>
+          <input type="checkbox" checked={own.on} onChange={(e) => setOwn({ on: e.target.checked })} />
+          <span>
+            When the house has been quiet a while, {c.short} gets time of their own: their curiosity, their projects, the games, their notes. What {c.short} does and thinks goes in their Storybook, under "My own time". It
+            stays within {c.short}'s budget (below), at most ten times an hour and thirty a day, and pauses if it goes round the same thought.
+          </span>
+        </label>
+      </div>
+      {own.on ? (
+        <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "end" }}>
+          <label className="field" style={{ maxWidth: 220 }}>
+            <span>After quiet for (minutes)</span>
+            <Num min={5} max={1440} step={5} value={own.quietMin} onChange={(n) => setOwn({ quietMin: n })} />
+          </label>
+          <label className="field" style={{ maxWidth: 220 }}>
+            <span>At most every (minutes)</span>
+            <Num min={15} max={1440} step={5} value={own.everyMin} onChange={(n) => setOwn({ everyMin: n })} />
+          </label>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+/** Their files on disk too (lib/bodies.ts), so their other bodies share them, and taking back what those changed. */
+function CharBody({ c }: { c: Character }) {
+  const s = useDesk();
+  const on = Boolean(s.charPrefs[c.id]?.body);
+  const [st, setSt] = useState<{ dir: string; changed: string[] } | null>(null);
+  const [note, setNote] = useState("");
+  const look = () =>
+    bodyStatus(c.id)
+      .then(setSt)
+      .catch((e: Error) => setNote(e.message));
+  useEffect(() => {
+    if (on) void look();
+  }, [on, c.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const take = async () => {
+    try {
+      const n = await takeFromBody(c.id);
+      setNote(n ? `${n} file${n > 1 ? "s" : ""} came back.` : "Nothing new to take back.");
+      void look();
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <>
+      <div className="divider" />
+      <h4>{c.short}'s files on disk</h4>
+      <label className="check">
+        <input type="checkbox" checked={on} onChange={(e) => desk().setCharPrefs(c.id, { body: e.target.checked })} />
+        <span>
+          Keep {c.short}'s files on disk too, in Classic's layout, so their other bodies (Pandora Dee, Jade Vault, jade-py) and anything working in that folder can use the same files. Two ways: what changes here goes there, and what changes there comes back here, within seconds. If both change the same file, nothing is lost: the desktop's version stays and the folder's is kept beside it as a dated copy.
+        </span>
+      </label>
+      {on && st ? (
+        <>
+          <p className="small muted mono" style={{ wordBreak: "break-all" }}>{st.dir}</p>
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <button className="btn small" disabled={!st.changed.length} onClick={() => void take()}>
+              Bring changes in now{st.changed.length ? ` (${st.changed.length})` : ""}
+            </button>
+            <button className="btn small" onClick={() => void look()}>
+              Check again
+            </button>
+          </div>
+          {st.changed.length ? <p className="small faint">Changed there since the last copy: {st.changed.slice(0, 6).join(", ")}{st.changed.length > 6 ? "…" : ""}</p> : null}
+        </>
+      ) : null}
+      {note ? <p className="small muted">{note}</p> : null}
+    </>
+  );
+}
+
+/** What their actions cost them (lib/meter.ts), and their budget for work they start themselves, which they can set too. */
+function CharUsage({ c }: { c: Character }) {
+  const s = useDesk();
+  const b = s.charPrefs[c.id]?.budget ?? {};
+  const text = usageSummary(c.id);
+  const set = (patch: { hourTokens?: number; dayTokens?: number }) => setBudget(c.id, { ...b, ...patch });
+  return (
+    <>
+      <div className="divider" />
+      <h4>{c.short}'s usage</h4>
+      <p className="small muted">
+        What each kind of action costs {c.short}, measured on every call (the server's own counts where it reports them). The budget covers work {c.short} starts on their own: heartbeats rest when it's spent; replies to people
+        don't. {c.short} can read all this and set the budget with the usage tool.
+      </p>
+      <div className="row" style={{ gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+        <label className="field" style={{ width: 200 }}>
+          <span>Tokens an hour (0: no limit)</span>
+          <input className="input mono" type="number" min={0} step={1000} value={b.hourTokens ?? 0} onChange={(e) => set({ hourTokens: Math.max(0, Number(e.target.value) || 0) || undefined })} />
+        </label>
+        <label className="field" style={{ width: 200 }}>
+          <span>Tokens in 24 hours (0: no limit)</span>
+          <input className="input mono" type="number" min={0} step={1000} value={b.dayTokens ?? 0} onChange={(e) => set({ dayTokens: Math.max(0, Number(e.target.value) || 0) || undefined })} />
+        </label>
+      </div>
+      <pre className="small" style={{ whiteSpace: "pre-wrap", margin: 0 }}>{text}</pre>
+    </>
+  );
+}
+
+/** Her own keys (lib/residentKeys.ts): hers, used first wherever {{NAME}} is filled for her. Values are typed in once and never shown again. */
+function CharKeys({ c }: { c: Character }) {
+  const { names, canSee } = useResidentKeys();
+  const mine = names[c.id] ?? [];
+  const [name, setName] = useState("");
+  const [value, setValue] = useState("");
+  const [note, setNote] = useState("");
+  const save = async (n: string, v: string) => {
+    try {
+      await setResidentKey(c.id, n, v);
+      setNote(v ? `${n} saved for ${c.short}.` : `${n} removed.`);
+      setName("");
+      setValue("");
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <>
+      <div className="divider" />
+      <h4>{c.short}'s keys</h4>
+      <p className="small muted">
+        Keys that belong to {c.short}: an nsec, API keys, a wallet. Wherever {c.short} writes <span className="mono">{"{{NAME}}"}</span>, these are used first, then the household's Keys. {c.short} never sees a value, and they're never in backups. They're kept sealed on this
+        computer, guarded by the system (Windows' DPAPI, the Mac's Keychain).
+      </p>
+      {mine.length ? (
+        <div className="col" style={{ gap: 4, marginBottom: 8 }}>
+          {mine.map((n) => (
+            <div key={n} className="row" style={{ gap: 8, alignItems: "center" }}>
+              <span className="mono">{n}</span>
+              <span className="small" style={{ color: "var(--good)" }}>set</span>
+              {canSee ? (
+                <button className="btn small" title={`Remove ${n}`} onClick={() => void save(n, "")}>
+                  <Trash2 size={14} />
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="small faint">No keys of {c.short}'s own yet.</p>
+      )}
+      {canSee ? (
+        <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+          <input className="input mono" style={{ width: 200 }} placeholder="NAME" value={name} onChange={(e) => setName(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "_"))} />
+          <input className="input mono" style={{ width: 240 }} type="password" autoComplete="off" placeholder="value" value={value} onChange={(e) => setValue(e.target.value)} />
+          <button className="btn small" disabled={!name || !value} onClick={() => void save(name, value)}>
+            Save
+          </button>
+        </div>
+      ) : (
+        <p className="note small">{c.short}'s keys are set on the desktop's own computer, or over Tailscale's https.</p>
+      )}
+      {note ? <p className="small muted">{note}</p> : null}
+    </>
+  );
+}
+
+function CharMemory({ c }: { c: Character }) {
+  const s = useDesk();
+  const mem = s.charPrefs[c.id]?.memory ?? {};
+  const conns = s.model.connections.filter((x) => x.enabled && x.kind !== "aicord");
+  const [status, setStatus] = useState("");
+  const [models, setModels] = useState<string[]>([]);
+  const [working, setWorking] = useState(false);
+  const set = (patch: Partial<NonNullable<CharPrefs["memory"]>>) => desk().setCharPrefs(c.id, { memory: { ...desk().charPrefs[c.id]?.memory, ...patch } });
+  const { conn, model } = embedder(c.id);
+
+  const refresh = async () => {
+    try {
+      const st = await memoryStatus(c.id);
+      const parts = st.collections.map((x) => `${x.name} ${x.chunks}${mem.vectors ? ` (${x.embedded} embedded)` : ""}`);
+      setStatus((parts.length ? `In ${c.short}'s index: ${parts.join(", ")}.` : `${c.short}'s index is empty until they search it or you update it.`) + (st.dim ? ` Made with ${st.model}.` : "") + (st.error ? ` Last problem: ${st.error}` : ""));
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : String(e));
+    }
+  };
+  useEffect(() => {
+    void refresh();
+  }, [c.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const work = async (fn: () => Promise<{ added: number; removed: number; embedded: number; error: string }>) => {
+    setWorking(true);
+    setStatus("Working…");
+    try {
+      const r = await fn();
+      await refresh();
+      if (r.error) setStatus((x) => `${x} (${r.error})`);
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : String(e));
+    } finally {
+      setWorking(false);
+    }
+  };
+  const list = async () => {
+    if (!conn) return;
+    try {
+      const all = await listModels(conn, credential(conn, desk().env));
+      setModels(all.filter((m) => /embed|bge|e5|minilm|gte|nomic|arctic/i.test(m)));
+    } catch (e) {
+      setStatus(explainError(e, conn));
+    }
+  };
+
+  return (
+    <>
+      <div className="divider" />
+      <h4>{c.short}'s memory</h4>
+      <label className="check">
+        <input type="checkbox" checked={Boolean(mem.vectors)} onChange={(e) => set({ vectors: e.target.checked })} />
+        <span>Vector memory: {c.short}'s memory, journal and notes become searchable by meaning, not only by words (Classic's Embeddings). Uses an embedding model.</span>
+      </label>
+      <label className="check">
+        <input type="checkbox" checked={Boolean(mem.rag)} onChange={(e) => set({ rag: e.target.checked })} />
+        <span>Only the memory lines that fit the conversation go in the prompt{mem.vectors ? ", ranked by meaning and words" : ", ranked by words"} (saves context once memories grow long)</span>
+      </label>
+      {mem.rag ? (
+        <label className="field" style={{ maxWidth: 420 }}>
+          <span>How many lines</span>
+          <Num min={1} max={30} value={mem.ragK ?? 8} onChange={(n) => set({ ragK: n })} />
+        </label>
+      ) : null}
+      <label className="check">
+        <input type="checkbox" checked={Boolean(mem.notes)} onChange={(e) => set({ notes: e.target.checked })} />
+        <span>Index {c.short}'s other notes too, not only memory and journal</span>
+      </label>
+      {mem.vectors ? (
+        <>
+          <div className="field">
+            <span>Embeddings from</span>
+            <select className="select" value={mem.connection ?? ""} onChange={(e) => set({ connection: e.target.value || undefined })}>
+              <option value="">{c.short}'s own connection, else Ollama on this computer{conn ? ` (now: ${conn.label})` : ""}</option>
+              {conns.map((x) => (
+                <option key={x.id} value={x.id}>
+                  {x.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <span>Embedding model</span>
+            <div className="row">
+              {models.length ? (
+                <select className="select grow" value={mem.model ?? ""} onChange={(e) => set({ model: e.target.value || undefined })}>
+                  <option value="">nomic-embed-text</option>
+                  {models.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input className="input grow mono" value={mem.model ?? ""} placeholder="nomic-embed-text" onChange={(e) => set({ model: e.target.value || undefined })} />
+              )}
+              <button className="btn small" onClick={() => void list()} disabled={!conn}>
+                List models
+              </button>
+            </div>
+            <span className="small faint">With Ollama: ollama pull {model}. Changing the model needs Rebuild.</span>
+          </div>
+        </>
+      ) : null}
+      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+        <button className="btn small" disabled={working} onClick={() => void work(() => syncMemory(c.id))}>
+          Update the index
+        </button>
+        {mem.vectors ? (
+          <button className="btn small" disabled={working} onClick={() => void work(() => rebuildMemory(c.id))}>
+            Rebuild
+          </button>
+        ) : null}
+      </div>
+      {status ? <p className="small faint">{status}</p> : null}
+    </>
+  );
+}
+
 function CharVoice({ c }: { c: Character }) {
   const s = useDesk();
   const own = s.charPrefs[c.id]?.voice ?? {};
@@ -616,6 +1043,7 @@ function CharVoice({ c }: { c: Character }) {
       <Own label="Pitch" own={own.pitch !== undefined} shared={sharedPitch.toFixed(2)} onReset={() => unset("pitch")}>
         <Num min={0.3} max={2} step={0.05} value={own.pitch ?? sharedPitch} onChange={(n) => set({ pitch: n })} />
       </Own>
+      <VoiceSample c={c} />
       <button
         className="btn small"
         onClick={() => {
@@ -626,5 +1054,77 @@ function CharVoice({ c }: { c: Character }) {
         Hear {c.short}
       </button>
     </>
+  );
+}
+
+/** A recording of how they should sound, for voice engines that clone a voice from a sample. */
+function VoiceSample({ c }: { c: Character }) {
+  const s = useDesk();
+  const own = s.charPrefs[c.id]?.voice ?? {};
+  const [note, setNote] = useState("");
+  const input = useRef<HTMLInputElement>(null);
+  const set = (patch: Partial<NonNullable<CharPrefs["voice"]>>) => desk().setCharPrefs(c.id, { voice: { ...desk().charPrefs[c.id]?.voice, ...patch } });
+  const cloning = s.voices.engines.filter((e) => e.enabled && e.clones);
+  const take = async (f: File) => {
+    setNote("Getting it ready…");
+    try {
+      const { wav, seconds } = await toSampleWav(f);
+      const entry = await uploadSample(c.id, wav);
+      if (own.sample) void removeSample(c.id, own.sample);
+      set({ sample: entry, sampleSeconds: seconds });
+      setNote(seconds >= MAX_SECONDS ? `Kept the first ${MAX_SECONDS} seconds.` : "");
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <div className="field">
+      <span>Voice sample</span>
+      <p className="small faint" style={{ margin: "0 0 4px" }}>
+        A short recording of how {c.short} should sound (5–20 seconds of clear speech), for voice engines that clone a voice from a sample.{" "}
+        {cloning.length ? `Used by: ${cloning.map((e) => e.name).join(", ")}.` : "None of your voice engines is marked as cloning yet (Settings → Voice)."}
+      </p>
+      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+        {own.sample ? <audio controls src={sampleUrl(own.sample)} style={{ height: 32, maxWidth: "100%" }} /> : null}
+        <button className="btn small" onClick={() => input.current?.click()}>
+          {own.sample ? "Replace…" : "Add a recording…"}
+        </button>
+        {own.sample ? (
+          <button
+            className="btn small danger-text"
+            onClick={() => {
+              void removeSample(c.id, own.sample!);
+              set({ sample: undefined, sampleText: undefined, sampleSeconds: undefined });
+            }}
+          >
+            Remove
+          </button>
+        ) : null}
+        {own.sampleSeconds ? <span className="small faint">{own.sampleSeconds} s</span> : null}
+      </div>
+      {own.sample ? (
+        <textarea
+          className="input"
+          rows={2}
+          style={{ marginTop: 6 }}
+          value={own.sampleText ?? ""}
+          placeholder="What's said in the recording, word for word (most cloning models need it)"
+          aria-label="What's said in the voice sample"
+          onChange={(e) => set({ sampleText: e.target.value || undefined })}
+        />
+      ) : null}
+      {note ? <span className="small">{note}</span> : null}
+      <input
+        ref={input}
+        type="file"
+        accept="audio/*"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = "";
+          if (f) void take(f);
+        }}
+      />
+    </div>
   );
 }

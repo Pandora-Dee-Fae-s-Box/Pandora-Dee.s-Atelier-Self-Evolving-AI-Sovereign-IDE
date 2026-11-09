@@ -7,14 +7,21 @@ import { outbound } from "./outbound.ts";
 import { allowed, blockedBecause } from "./privacy.ts";
 import { speech } from "./voice.ts";
 
-export type { MusicPrefs, Station } from "./musicPrefs.ts";
+export type { MusicPlaylist, MusicPrefs, Station } from "./musicPrefs.ts";
 import type { Station } from "./musicPrefs.ts";
 export type Item = ({ kind: "track" } & Track) | ({ kind: "radio" } & Station);
-export type Track = { id: string; title: string; artist: string; album: string; year: number; track: number; genre: string; duration: number; cover: boolean; bitrate: number; size: number; folder: string; comment?: string };
+export type Track = {
+  id: string; title: string; artist: string; album: string; year: number; track: number; genre: string; duration: number; cover: boolean; bitrate: number; size: number; folder: string; comment?: string;
+  /** the file's own name */ file?: string;
+  /** where it is inside its music folder (for playlist files) */ rel?: string;
+  /** a song another device is sharing (lib/musicShare.ts): where it plays from, and which device has it */ src?: string; device?: string;
+};
 
 type Runtime = {
   tracks: Track[];
   own: string;
+  /** The music folders, as the desktop's server keeps them (the same for every device). */
+  folders: string[];
   loaded: boolean;
   scanning: string;
   queue: Item[];
@@ -25,7 +32,7 @@ type Runtime = {
   error: string;
 };
 
-export const useMusic = create<Runtime>(() => ({ tracks: [], own: "", loaded: false, scanning: "", queue: [], index: -1, playing: false, position: 0, duration: 0, error: "" }));
+export const useMusic = create<Runtime>(() => ({ tracks: [], own: "", folders: [], loaded: false, scanning: "", queue: [], index: -1, playing: false, position: 0, duration: 0, error: "" }));
 const mu = () => useMusic.getState();
 const prefs = () => desk().music;
 const setPrefs = (p: Partial<import("./musicPrefs.ts").MusicPrefs>) => desk().set({ music: { ...desk().music, ...p } });
@@ -49,9 +56,47 @@ function element(): HTMLAudioElement {
   audio.addEventListener("ended", () => void next(true));
   audio.addEventListener("error", () => {
     const cur = current();
-    useMusic.setState({ playing: false, error: cur?.kind === "radio" ? `${cur.name} isn't answering.` : "That file couldn't be played (its format may not be supported by this browser)." });
+    const code = audio?.error?.code ?? 0;
+    if (cur?.kind === "radio") return useMusic.setState({ playing: false, error: `${cur.name} isn't answering.` });
+    useMusic.setState({ playing: false, error: "That file couldn't be played." });
+    if (cur?.kind === "track") void whyNot(cur, code).then((error) => current() === cur && useMusic.setState({ error }));
   });
   return audio;
+}
+
+const KIND_OF: Record<string, string> = { mp3: "audio/mpeg", ogg: "audio/ogg", oga: "audio/ogg", opus: "audio/ogg; codecs=opus", wav: "audio/wav", flac: "audio/flac", m4a: "audio/mp4", aac: "audio/aac", webm: "audio/webm" };
+/** Whether this browser plays that kind of file at all (so a failure is the file's, not the browser's). */
+const playsKind = (ext: string) => Boolean(KIND_OF[ext] && new Audio().canPlayType(KIND_OF[ext]));
+
+/** Which file wouldn't play, why, and where it is, in plain words. */
+async function whyNot(t: Track, code: number) {
+  const which = `"${t.title}${t.artist ? ` · ${t.artist}` : ""}"`;
+  // a song shared by another device plays only while that device's page is open and awake
+  if (t.src) return `${which} is on ${t.device || "another device"}, which isn't answering: its SEASIDE page closed, or it's asleep.`;
+  const name = t.file ?? "";
+  const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
+  const where = `${name ? `${name}, ` : ""}in ${t.folder || "your music"}`;
+  let status = 0;
+  try {
+    status = (await fetch(`/api/music/file?id=${t.id}`, { headers: { Range: "bytes=0-0" } })).status;
+  } catch {
+    status = -1;
+  }
+  const why =
+    status === 404
+      ? "it isn't there any more: moved, renamed or deleted since Music last looked (Rescan in Music's folders picks up the change)"
+      : status === 403
+        ? "the desktop isn't allowed to read it (its folder may have been taken out of Music)"
+        : status === -1
+          ? "the desktop didn't answer (is it still running, and is this device still connected?)"
+          : code === 3
+            ? "it looks damaged partway through (it may not have finished copying or downloading)"
+            : code === 2
+              ? "the connection dropped while it was loading"
+              : playsKind(ext)
+                ? `it isn't a playable .${ext} (it may be damaged, cut short, or not really audio)`
+                : `this browser can't play ${ext ? `.${ext} files` : "this kind of file"}${ext === "flac" || ext === "alac" || ext === "ape" || ext === "wma" ? " (another browser, or converting it to MP3 or Opus, will)" : ""}`;
+  return `Couldn't play ${which} (${where}): ${why}.`;
 }
 
 /** Web Audio starts on the first play (browsers only allow it after a click). */
@@ -167,14 +212,17 @@ useDesk.subscribe((s, p) => {
 
 export async function loadLibrary() {
   const r = await fetch("/api/music/library");
-  const j = (await r.json()) as { tracks: Track[]; own: string };
-  useMusic.setState({ tracks: j.tracks.sort(byAlbum), own: j.own, loaded: true });
+  const j = (await r.json()) as { tracks: Track[]; own: string; folders?: string[] };
+  useMusic.setState({ tracks: j.tracks.sort(byAlbum), own: j.own, folders: j.folders ?? [], loaded: true });
 }
 
-export async function scan(folders = prefs().folders) {
+/** Read the music folders again. The folders are the server's own list (the same on every device): pass `folders`
+ *  only to change that list (adding or removing one). Sending a device's own idea of them once wiped the library
+ *  down to the one song just made, on a device that had never had the folders added. */
+export async function scan(folders?: string[]) {
   useMusic.setState({ scanning: "Reading your music…" });
   try {
-    const r = await fetch("/api/music/scan", { method: "POST", body: JSON.stringify({ folders }) });
+    const r = await fetch("/api/music/scan", { method: "POST", body: JSON.stringify(folders ? { folders } : {}) });
     const j = (await r.json()) as { tracks: number; read: number; failed: number; walked?: number; unreadable?: string[] };
     await loadLibrary();
     return j;
@@ -229,8 +277,8 @@ export function forgetStation(url: string) {
 // ---------- playing ----------
 
 export const current = (): Item | undefined => mu().queue[mu().index];
-const srcOf = (it: Item) => (it.kind === "track" ? `/api/music/file?id=${it.id}` : `/api/music/radio?url=${encodeURIComponent(it.url)}`);
-export const coverOf = (it?: Item) => (!it ? "" : it.kind === "track" ? (it.cover ? `/api/music/cover?id=${it.id}` : "") : it.favicon ?? "");
+const srcOf = (it: Item) => (it.kind === "track" ? (it.src ?? `/api/music/file?id=${it.id}`) : `/api/music/radio?url=${encodeURIComponent(it.url)}`);
+export const coverOf = (it?: Item) => (!it ? "" : it.kind === "track" ? (it.cover && !it.src ? `/api/music/cover?id=${it.id}` : "") : it.favicon ?? "");
 export const label = (it?: Item) => (!it ? "" : it.kind === "track" ? `${it.title}${it.artist ? ` · ${it.artist}` : ""}` : it.name);
 
 const listeners = new Set<(it: Item) => void>();
@@ -320,6 +368,34 @@ export async function next(auto = false) {
   if (index + 1 < queue.length) return start(index + 1);
   if (prefs().repeat === "all" || !auto) return start(0);
   useMusic.setState({ playing: false });
+}
+
+/** Skip the rest of this album, or everything by this artist that comes next, to the first song in the queue from
+ *  another album (or artist). Playing by artist or album, or albums shuffled, keeps them together in the queue, so
+ *  this skips the whole run. With repeat on it wraps round. Says what it did. */
+export function skipBy(by: "album" | "artist"): string {
+  const { queue, index } = mu();
+  const cur = queue[index];
+  if (!cur || cur.kind !== "track") {
+    void next();
+    return "Next.";
+  }
+  // songs with no album (or artist) count as their own
+  const key = (it: Item) => (it.kind !== "track" ? `\u0001${it.url}` : by === "album" ? (it.album ? it.album.trim().toLowerCase() : `\u0002${it.id}`) : it.artist ? it.artist.trim().toLowerCase() : `\u0002${it.id}`);
+  const here = key(cur);
+  const after = queue.slice(index + 1).findIndex((it) => key(it) !== here);
+  if (after >= 0) {
+    void start(index + 1 + after);
+    return "";
+  }
+  if (prefs().repeat !== "off") {
+    const from = queue.slice(0, index).findIndex((it) => key(it) !== here);
+    if (from >= 0) {
+      void start(from);
+      return "";
+    }
+  }
+  return by === "album" ? "That's the last album in the list." : "That's the last artist in the list.";
 }
 
 export function previous() {

@@ -1,7 +1,9 @@
 // Character backups: our own format, the earlier desk's format, and character exports from
 // other apps (AICord and similar). Anything that looks like a token or secret is dropped.
 
-import { blankCharacter, slug, type Character } from "./characters.ts";
+import { blankCharacter, slug, type Character, type ClassicKeep } from "./characters.ts";
+import type { CharPrefs } from "./store.ts";
+import type { Connection } from "./model.ts";
 
 export const FORMAT = "pandora-dee-character";
 
@@ -53,7 +55,15 @@ export function parseBackup(raw: string, takenIds: string[]): Parsed {
   const note = removed.n ? ` ${removed.n} secret-looking value${removed.n === 1 ? " was" : "s were"} left out. Put keys in Keys instead.` : "";
 
   let c: Character;
-  if (clean.format === FORMAT && clean.character && typeof clean.character === "object") {
+  let classicNote = "";
+  if (isClassicBackup(clean)) {
+    // a Pandora Dee or Jade Vault backup (Config → Back up): her files, and her Classic settings kept whole
+    const { character, skipped } = fromClassic(clean);
+    c = character;
+    classicNote =
+      (skipped.notes ? ` ${skipped.notes} note${skipped.notes === 1 ? "" : "s"} outside her folder stay in the backup (bring them into Notes from there).` : "") +
+      (skipped.binary ? ` ${skipped.binary} picture or binary file${skipped.binary === 1 ? " was" : "s were"} left out.` : "");
+  } else if (clean.format === FORMAT && clean.character && typeof clean.character === "object") {
     const ch = clean.character as Partial<Character>;
     if (!text(ch.name)) return { ok: false, reason: "That backup has no name." };
     c = { ...blankCharacter(text(ch.name)), ...ch, files: (clean.files as Record<string, string>) ?? {} } as Character;
@@ -104,7 +114,218 @@ export function parseBackup(raw: string, takenIds: string[]): Parsed {
   const files: Record<string, string> = {};
   for (const [k, v] of Object.entries(c.files ?? {})) if (typeof v === "string") files[k.replace(/^\/+/, "")] = v;
   c.files = files;
-  return { ok: true, character: c, note: `${c.name} is on the desktop.${note}` };
+  return { ok: true, character: c, note: `${c.name} is on the desktop.${classicNote}${note}` };
+}
+
+// ---------- Classic (Pandora Dee / Jade Vault) backups: { app: "jade-vault", kind: "config" | "full", settings, vault: { files } } ----------
+
+/** Her files in Classic's folder ↔ the desktop's names for them. The rest of her folder rides along under classic/. */
+const CLASSIC_NAMES: [desk: string, classic: (root: string) => string][] = [
+  ["SOUL.md", (r) => `/${r}/SOUL.md`],
+  ["MEMORY.md", (r) => `/${r}/Memory.md`],
+  ["SYSTEM.md", (r) => `/${r}/SYSTEM.md`],
+  ["HEARTBEAT.md", (r) => `/${r}/HEARTBEAT.md`],
+  ["CURIOSITY.md", (r) => `/${r}/CURIOSITY.md`],
+  ["mcp.json", (r) => `/${r}/mcp.json`],
+];
+const CLASSIC_DIRS: [desk: string, classic: (root: string) => string][] = [
+  ["skills/", (r) => `/${r}/skills/`],
+  ["journal/", (r) => `/${r}/Journal/`],
+  ["rituals/", (r) => (r === "Jade" ? "/Jade/Flows/" : "/Pandora/Rituals/")],
+];
+
+/** Classic's own list of settings that hold keys or logins (SECRET_KEYS in both apps), and the API token: never kept, never exported. */
+export const CLASSIC_SECRETS = ["ollamaKey", "groqKey", "oaiKey", "lcppKey", "ollayaKey", "mcpSecrets", "secrets", "vecToken", "aicKey", "dcToken", "embedKey", "sshHosts", "abToken", "abPass", "apiToken"];
+const withoutSecrets = (s: Record<string, unknown>) => Object.fromEntries(Object.entries(s).filter(([k]) => !CLASSIC_SECRETS.includes(k)));
+
+export function isClassicBackup(d: unknown): boolean {
+  const o = d as { app?: unknown; vault?: { files?: unknown } };
+  return o?.app === "jade-vault" && Boolean(o.vault?.files && typeof o.vault.files === "object");
+}
+
+/** A Classic backup as a desktop character: her files under the desktop's names, her settings kept whole. */
+export function fromClassic(d: Record<string, unknown>): { character: Character; skipped: { notes: number; binary: number } } {
+  const files = (d.vault as { files: Record<string, unknown> }).files;
+  const paths = Object.keys(files);
+  const root: ClassicKeep["root"] = paths.filter((p) => p.startsWith("/Pandora/")).length >= paths.filter((p) => p.startsWith("/Jade/")).length ? "Pandora" : "Jade";
+  const lower = new Map(paths.map((p) => [p.toLowerCase(), p]));
+  const out: Record<string, string> = {};
+  const used = new Set<string>();
+  const skipped = { notes: 0, binary: 0 };
+  const take = (p: string) => {
+    const v = files[p];
+    used.add(p);
+    if (typeof v === "string") return v;
+    skipped.binary++;
+    return null;
+  };
+  for (const [desk, cl] of CLASSIC_NAMES) {
+    const p = lower.get(cl(root).toLowerCase());
+    if (p) {
+      const v = take(p);
+      if (v !== null) out[desk] = v;
+    }
+  }
+  const agents = lower.get("/agents.md") ?? lower.get(`/${root}/agents.md`.toLowerCase());
+  if (agents) {
+    const v = take(agents);
+    if (v !== null) out["AGENTS.md"] = v;
+  }
+  for (const p of paths) {
+    if (used.has(p)) continue;
+    const dir = CLASSIC_DIRS.find(([, cl]) => p.toLowerCase().startsWith(cl(root).toLowerCase()));
+    const inRoot = p.toLowerCase().startsWith(`/${root}/`.toLowerCase());
+    if (!dir && !inRoot) {
+      skipped.notes++; // the person's own notes (a full backup): they stay in the backup file
+      continue;
+    }
+    if (/\/\.index\//i.test(p)) continue; // search indexes: rebuilt by Classic
+    const v = take(p);
+    if (v === null) continue;
+    out[dir ? dir[0] + p.slice(dir[1](root).length) : `classic/${p.slice(root.length + 2)}`] = v;
+  }
+  const soul = out["SOUL.md"] ?? "";
+  const name = (/^#\s+(.+)$/m.exec(soul)?.[1] ?? "").trim() || (root === "Pandora" ? "Pandora Dee" : "Jade");
+  const c = blankCharacter(name);
+  c.files = { ...c.files, ...out };
+  c.classic = {
+    app: root === "Pandora" ? "pandora-dee" : "jade-vault",
+    root,
+    settings: withoutSecrets((d.settings as Record<string, unknown>) ?? {}),
+    storage: (d.storage as Record<string, unknown>) ?? {},
+  };
+  return { character: c, skipped };
+}
+
+// Classic's provider names and the desktop connections they mean (by where the connection points)
+const PROVIDER_AT: [provider: string, test: (c: Connection) => boolean][] = [
+  ["local", (c) => c.kind === "ollama" && /localhost|127\.0\.0\.1/.test(c.baseUrl)],
+  ["cloud", (c) => /ollama\.com/.test(c.baseUrl)],
+  ["groq", (c) => /groq\.com/.test(c.baseUrl)],
+  ["openai", (c) => /api\.openai\.com/.test(c.baseUrl)],
+  ["aicord", (c) => c.kind === "aicord"],
+];
+
+/** The Classic settings the desktop has a place for, as her per-character preferences. */
+export function prefsFromClassic(s: Record<string, unknown>, connections: Connection[]): Partial<CharPrefs> {
+  const p: Partial<CharPrefs> = {};
+  if (typeof s.model === "string" && s.model) p.model = s.model;
+  if (typeof s.temperature === "number") p.temperature = s.temperature;
+  if (typeof s.maxTurns === "number" && s.maxTurns > 0) p.maxSteps = s.maxTurns;
+  const conn = PROVIDER_AT.find(([name]) => name === s.provider)?.[1];
+  const found = conn && connections.find(conn);
+  if (found) p.connection = found.id;
+  const voice: NonNullable<CharPrefs["voice"]> = {};
+  if (typeof s.voiceName === "string" && s.voiceName) voice.voiceName = s.voiceName;
+  if (typeof s.voiceRate === "number") voice.rate = s.voiceRate;
+  if (typeof s.voicePitch === "number") voice.pitch = s.voicePitch;
+  if (Object.keys(voice).length) p.voice = voice;
+  // her own switches: thinking first, journal and memory after a chat
+  if (typeof s.thinkOn === "boolean") p.think = s.thinkOn;
+  if (typeof s.journalOn === "boolean") p.journal = s.journalOn;
+  if (typeof s.memoryOn === "boolean") p.learn = s.memoryOn;
+  // her helper model (journal, memory, heartbeat)
+  const aux = PROVIDER_AT.find(([name]) => name === s.auxProv)?.[1];
+  const auxConn = aux && connections.find(aux);
+  if (auxConn) p.helper = { connection: auxConn.id, ...(typeof s.auxModel === "string" && s.auxModel ? { model: s.auxModel } : {}) };
+  // her heartbeat
+  if (["hbOn", "hbEvery", "hbStart", "hbEnd", "hbPrompt"].some((k) => k in s))
+    p.heartbeat = {
+      on: s.hbOn === true,
+      everyMin: typeof s.hbEvery === "number" && s.hbEvery > 0 ? s.hbEvery : 30,
+      from: typeof s.hbStart === "string" ? s.hbStart : "08:00",
+      to: typeof s.hbEnd === "string" ? s.hbEnd : "22:00",
+      prompt: typeof s.hbPrompt === "string" ? s.hbPrompt : "",
+    };
+  // her vector memory (Config → Embeddings), when Classic had it set up
+  if (["embedOn", "embedModel", "embedHost", "memoryRag", "memoryRagK", "embedNotes"].some((k) => k in s)) {
+    const mem: NonNullable<CharPrefs["memory"]> = { vectors: s.memoryOn !== false && s.embedOn !== false, rag: s.memoryRag === true };
+    if (typeof s.memoryRagK === "number" && s.memoryRagK > 0) mem.ragK = s.memoryRagK;
+    if (s.embedNotes === true) mem.notes = true;
+    if (typeof s.embedModel === "string" && s.embedModel) mem.model = s.embedModel;
+    const at = typeof s.embedHost === "string" ? s.embedHost.replace(/\/+$/, "") : "";
+    const host = at && connections.find((c) => c.baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "") === at.replace(/\/v1$/, ""));
+    if (host) mem.connection = host.id;
+    p.memory = mem;
+  }
+  return p;
+}
+
+/** Her desktop preferences written back over the Classic settings she came with (for Export for Classic). */
+export function classicFromPrefs(s: Record<string, unknown>, p: Partial<CharPrefs> | undefined, connections: Connection[]): Record<string, unknown> {
+  const out = { ...s };
+  if (!p) return out;
+  if (p.model) out.model = p.model;
+  if (typeof p.temperature === "number") out.temperature = p.temperature;
+  if (typeof p.maxSteps === "number") out.maxTurns = p.maxSteps;
+  const conn = p.connection && connections.find((c) => c.id === p.connection);
+  const provider = conn && PROVIDER_AT.find(([, test]) => test(conn))?.[0];
+  if (provider) out.provider = provider;
+  if (p.voice?.voiceName) out.voiceName = p.voice.voiceName;
+  if (typeof p.voice?.rate === "number") out.voiceRate = p.voice.rate;
+  if (typeof p.voice?.pitch === "number") out.voicePitch = p.voice.pitch;
+  if (typeof p.think === "boolean") out.thinkOn = p.think;
+  if (typeof p.journal === "boolean") out.journalOn = p.journal;
+  if (typeof p.learn === "boolean") out.memoryOn = p.learn;
+  const helper = p.helper?.connection && connections.find((c) => c.id === p.helper?.connection);
+  const auxProv = helper && PROVIDER_AT.find(([, test]) => test(helper))?.[0];
+  if (auxProv) {
+    out.auxProv = auxProv;
+    if (p.helper?.model) out.auxModel = p.helper.model;
+  }
+  if (p.heartbeat) {
+    out.hbOn = p.heartbeat.on;
+    out.hbEvery = p.heartbeat.everyMin;
+    out.hbStart = p.heartbeat.from;
+    out.hbEnd = p.heartbeat.to;
+    out.hbPrompt = p.heartbeat.prompt;
+  }
+  if (p.memory) {
+    out.embedOn = Boolean(p.memory.vectors);
+    out.memoryRag = Boolean(p.memory.rag);
+    if (p.memory.ragK) out.memoryRagK = p.memory.ragK;
+    out.embedNotes = Boolean(p.memory.notes);
+    if (p.memory.model) out.embedModel = p.memory.model;
+    const host = connections.find((c) => c.id === p.memory?.connection);
+    if (host?.kind === "ollama") out.embedHost = host.baseUrl;
+  }
+  return out;
+}
+
+/** A desktop character as a Classic config backup (Config → Import in Pandora Dee or Jade Vault). Keys never go in. */
+/** The reverse of toClassic for one file: its desktop name from its path in Classic's layout, or null when it isn't
+ *  hers. `has`: her files now, which settle whether /<root>/x was x or classic/x. */
+export function deskNameOf(p: string, root: string, has: Record<string, string>): string | null {
+  const low = p.toLowerCase();
+  if (low === "/agents.md" || low === `/${root}/agents.md`.toLowerCase()) return "AGENTS.md";
+  const named = CLASSIC_NAMES.find(([, cl]) => cl(root).toLowerCase() === low);
+  if (named) return named[0];
+  const dir = CLASSIC_DIRS.find(([, cl]) => low.startsWith(cl(root).toLowerCase()));
+  if (dir) return dir[0] + p.slice(dir[1](root).length);
+  if (!low.startsWith(`/${root}/`.toLowerCase())) return null;
+  const rest = p.slice(root.length + 2);
+  return `classic/${rest}` in has ? `classic/${rest}` : rest;
+}
+
+export function toClassic(c: Character, files: Record<string, string>, prefs?: Partial<CharPrefs>, connections: Connection[] = []) {
+  const root = c.classic?.root ?? (/jade/i.test(c.id) ? "Jade" : "Pandora");
+  const vault: Record<string, string> = {};
+  for (const [p, v] of Object.entries(files)) {
+    const named = CLASSIC_NAMES.find(([desk]) => desk === p);
+    const dir = CLASSIC_DIRS.find(([desk]) => p.startsWith(desk));
+    const path = p === "AGENTS.md" ? "/agents.md" : named ? named[1](root) : dir ? dir[1](root) + p.slice(dir[0].length) : p.startsWith("classic/") ? `/${root}/${p.slice(8)}` : `/${root}/${p}`;
+    vault[path] = v;
+  }
+  return {
+    app: "jade-vault",
+    format: 1,
+    kind: "config",
+    exportedAt: new Date().toISOString(),
+    includesKeys: false,
+    settings: withoutSecrets(scrub(classicFromPrefs(c.classic?.settings ?? {}, prefs, connections)) as Record<string, unknown>),
+    storage: c.classic?.storage ?? {},
+    vault: { files: vault, dirs: [] },
+  };
 }
 
 export function download(name: string, data: unknown) {

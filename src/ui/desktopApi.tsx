@@ -1,17 +1,21 @@
 // What the desktop offers the rest of the app (its icons, opening Settings, loading a character backup).
 // Kept apart from Desktop.tsx, so that file exports only components and React can update it in place.
 import { useEffect, useState, type ReactNode } from "react";
-import { AudioWaveform, BookOpen, Cable, Code2, FolderOpen, Gamepad2, Globe, HelpCircle, KeyRound, MessageCircleHeart, MessagesSquare, Music2, NotebookPen, Palette, Settings as SettingsIcon, ShieldAlert, SquareTerminal, Users, Video } from "lucide-react";
+import { Clapperboard, Network, Pickaxe, FolderTree, AudioWaveform, BookOpen, Cable, Code2, FolderOpen, Gamepad2, Globe, HelpCircle, KeyRound, MessageCircleHeart, MessagesSquare, Music2, NotebookPen, Palette, Settings as SettingsIcon, ShieldAlert, SquareTerminal, Users, Video } from "lucide-react";
 import { desk, type AppId } from "../lib/store.ts";
-import { parseBackup } from "../lib/backup.ts";
+import { parseBackup, prefsFromClassic } from "../lib/backup.ts";
 
 export const ICONS: Record<AppId, (size: number) => ReactNode> = {
   room: (s) => <MessagesSquare size={s} />,
   presence: (s) => <Video size={s} />,
   cast: (s) => <Users size={s} />,
   files: (s) => <FolderOpen size={s} />,
+  explorer: (s) => <FolderTree size={s} />,
   notes: (s) => <NotebookPen size={s} />,
   music: (s) => <Music2 size={s} />,
+  theater: (s) => <Clapperboard size={s} />,
+  pads: (s) => <Network size={s} />,
+  luanti: (s) => <Pickaxe size={s} />,
   visualizer: (s) => <AudioWaveform size={s} />,
   create: (s) => <Palette size={s} />,
   browser: (s) => <Globe size={s} />,
@@ -55,6 +59,8 @@ export function loadBackupFile(file: File) {
         return s.say(`${parsed.character.name} was added to the adult shelf. Unlock it in Settings → Adult shelf to see them.`);
       }
       s.addCharacter(parsed.character);
+      // a Classic character's model, temperature, turns and voice become hers here too
+      if (parsed.character.classic) s.setCharPrefs(parsed.character.id, prefsFromClassic(parsed.character.classic.settings, s.model.connections));
       const err = s.join(parsed.character.id);
       s.say(err ? `${parsed.note} ${err}` : parsed.note);
     })

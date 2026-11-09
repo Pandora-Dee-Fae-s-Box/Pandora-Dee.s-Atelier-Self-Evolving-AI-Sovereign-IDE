@@ -1,15 +1,24 @@
+import { viewH, viewW } from "../lib/zoom.ts";
+import { dossiers, PEOPLE_DIR } from "../lib/people.ts";
+import { dossierTemplate, REL_DEFAULT } from "../lib/peopleCore.ts";
+import { freePath, loadNotes, safeTitle, useNotes, writeNote } from "../lib/notes.ts";
+import { openNote } from "../ui/noteNav.ts";
+import { memoryApi, pageMemory, unloadMinimized, type ServerMemory } from "../lib/memory.ts";
 import { EngineVoicePicker, ListeningSettings, VoiceEnginesEditor } from "../ui/VoiceEngines.tsx";
 import { remoteFor } from "../lib/prefs.ts";
 import { Num } from "../ui/Num.tsx";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { desk, uid, useDesk, type Account } from "../lib/store.ts";
+import { CAT_COATS, desk, uid, useDesk, type Account, type Cat } from "../lib/store.ts";
 import { credential, listModels, explainError, pickModel, PRESETS, sampleRequest, scopeOf, SCOPE_LABEL, type Connection } from "../lib/model.ts";
 import { AicordSignIn } from "../ui/AicordSignIn.tsx";
+import { bringIn, joinSharedDesk, keepOwnDesk, oldDesk, whatItHas } from "../lib/deskSync.ts";
 import { ViaPicker } from "../ui/Via.tsx";
-import { askUser } from "../ui/Ask.tsx";
+import { askText, askUser } from "../ui/Ask.tsx";
+import { copyText } from "../lib/clipboard.ts";
 import { allowed, FEATURES, MODES, type Feature, type Mode } from "../lib/privacy.ts";
 import { canSeal, matches, seal, shrinkPicture } from "../lib/secure.ts";
+import { startToddler } from "../ui/Toddler.tsx";
 import { speak, voiceList } from "../lib/voice.ts";
 import type { Role } from "../lib/flood.ts";
 import { Confirm, PersonAvatar, RiskDialog, Seg, Sensitive } from "../ui/common.tsx";
@@ -25,8 +34,10 @@ import { ROUTER_AT } from "../lib/skills.ts";
 import type { ChatPrefs, NotesPrefs } from "../lib/store.ts";
 import { formatDate } from "../lib/templates.ts";
 import { CLOCK_DEFAULT, formatClock, REGIONS, validLocale, validZone, zones, type ClockPrefs } from "../lib/clock.ts";
+import { FromOtherDevices, TravelSwitch } from "../ui/Travel.tsx";
+import { BOX, installModule, lookForModules, type Found } from "../lib/modules.ts";
 
-type Section = "ai" | "chat" | "notes" | "look" | "clock" | "dock" | "hangout" | "voice" | "shortcuts" | "touch" | "classic" | "privacy" | "accounts" | "adult" | "storage" | "backup";
+type Section = "ai" | "chat" | "notes" | "look" | "clock" | "dock" | "hangout" | "voice" | "shortcuts" | "touch" | "classic" | "privacy" | "accounts" | "adult" | "storage" | "modules" | "memory" | "backup";
 
 const SECTIONS: { id: Section; label: string; sensitive?: boolean }[] = [
   { id: "ai", label: "AI" },
@@ -44,6 +55,8 @@ const SECTIONS: { id: Section; label: string; sensitive?: boolean }[] = [
   { id: "accounts", label: "Accounts" },
   { id: "adult", label: "Adult shelf", sensitive: true },
   { id: "storage", label: "Storage" },
+  { id: "memory", label: "Memory" },
+  { id: "modules", label: "Modules" },
   { id: "backup", label: "Backup and reset" },
 ];
 
@@ -58,12 +71,24 @@ export function SettingsApp() {
     window.addEventListener("pdd-settings", on);
     return () => window.removeEventListener("pdd-settings", on);
   }, []);
+  // on a narrow window the sections are a strip of tabs: keep the chosen one in view
+  const tabs = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const list = tabs.current;
+    const on = list?.querySelector<HTMLElement>(".item.on");
+    if (!list || !on || width === 0 || width >= 600) return;
+    list.scrollLeft = on.offsetLeft - (list.clientWidth - on.offsetWidth) / 2;
+  }, [section, width]);
   return (
-    <div ref={ref} className={`split${width < 600 ? " narrow" : ""}`}>
+    <div ref={ref} className={`split settings-split${width < 600 ? " narrow" : ""}`}>
       <aside className="side settings-nav">
-        <div className="list">
+        <div className="list" ref={tabs}>
           {SECTIONS.map((x) => (
-            <button key={x.id} className={`item${section === x.id ? " on" : ""}`} onClick={() => (setSection(x.id), sessionStorage.setItem("pdd-settings-section", x.id))}>
+            <button
+              key={x.id}
+              className={`item${section === x.id ? " on" : ""}`}
+              onClick={() => (setSection(x.id), sessionStorage.setItem("pdd-settings-section", x.id))}
+            >
               {x.label}
             </button>
           ))}
@@ -82,6 +107,8 @@ export function SettingsApp() {
         {section === "touch" ? <TouchSection /> : null}
         {section === "classic" ? <ClassicSection /> : null}
         {section === "storage" ? <StorageSection /> : null}
+        {section === "memory" ? <MemorySection /> : null}
+        {section === "modules" ? <ModulesSection /> : null}
         {section === "privacy" ? <PrivacySection /> : null}
         {section === "accounts" ? <AccountsSection /> : null}
         {section === "adult" ? <AdultSection /> : null}
@@ -94,6 +121,122 @@ export function SettingsApp() {
 function featureFor(c: Connection): Feature | null {
   const scope = scopeOf(c.baseUrl);
   return scope === "device" ? null : scope === "network" ? "network-models" : "online-models";
+}
+
+/** The module door (lib/modules.ts): repos in Pandora Dee Fae's Box (and others named) with a seaside-module.json. */
+function ModulesSection() {
+  const s = useDesk();
+  const [orgs, setOrgs] = useState(BOX);
+  const [found, setFound] = useState<Found[] | null>(null);
+  const [who, setWho] = useState(s.allCharacters()[0]?.id ?? "");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const run = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    setNote("");
+    try {
+      await fn();
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const look = () => run(async () => setFound(await lookForModules(orgs.split(/[\s,]+/).filter(Boolean))));
+  const install = (f: Found) =>
+    run(async () => {
+      setNote(await installModule(f, who));
+      setFound(await lookForModules(orgs.split(/[\s,]+/).filter(Boolean)));
+    });
+  return (
+    <>
+      <h4>Modules</h4>
+      <p className="small muted">
+        Pandora Dee Fae makes modules in her Box: repositories with a <span className="mono">seaside-module.json</span> that says what they bring. A skill, a Mini App, a character, or a tool server. They come in from the exact commit
+        listed, release files checked against their checksums; a tool server is only added, switched off, for you to look at first. Looking asks GitHub, so Privacy's web access needs to be on.
+      </p>
+      <div className="row" style={{ gap: 6, flexWrap: "wrap", alignItems: "end" }}>
+        <label className="field" style={{ width: 320 }}>
+          <span>Look in (GitHub organisations)</span>
+          <input className="input mono" value={orgs} onChange={(e) => setOrgs(e.target.value)} />
+        </label>
+        <button className="btn small" disabled={busy} onClick={() => void look()}>
+          Look for modules
+        </button>
+        <label className="field" style={{ width: 200 }}>
+          <span>Skills go to</span>
+          <select className="select" value={who} onChange={(e) => setWho(e.target.value)}>
+            {s.allCharacters().map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      {found && !found.length ? <p className="small faint">No modules there yet: no repo has a seaside-module.json.</p> : null}
+      {found?.map((f) => (
+        <div key={`${f.org}/${f.repo}`} className="card" style={{ padding: 10, marginTop: 8 }}>
+          <div className="row" style={{ gap: 8, alignItems: "center", justifyContent: "space-between" }}>
+            <span>
+              <b>{f.manifest?.name ?? f.repo}</b> <span className="small faint">{f.manifest ? `${f.manifest.kind} ${f.manifest.version}` : ""}</span>{" "}
+              <a className="small" href={f.url} target="_blank" rel="noreferrer">
+                {f.org}/{f.repo}
+              </a>
+            </span>
+            {f.manifest ? (
+              <button className="btn small" disabled={busy || f.installed?.commit === f.commit} onClick={() => void install(f)}>
+                {f.installed?.commit === f.commit ? "Installed" : f.installed ? "Update" : "Install"}
+              </button>
+            ) : null}
+          </div>
+          {f.manifest?.description ? <p className="small muted" style={{ margin: "6px 0 0" }}>{f.manifest.description}</p> : null}
+          {f.manifest?.needs.length ? <p className="small faint" style={{ margin: "4px 0 0" }}>Needs from Privacy: {f.manifest.needs.join(", ")}</p> : null}
+          {f.error ? <p className="small" style={{ color: "var(--warn)", margin: "6px 0 0" }}>{f.error}</p> : null}
+        </div>
+      ))}
+      {note ? <p className="small muted">{note}</p> : null}
+    </>
+  );
+}
+
+/** The heart's keeper (server/heart.mjs): the characters keep running while the desktop on this computer is closed. */
+function KeepRunning() {
+  const [st, setSt] = useState<{ keep: boolean; keeper: boolean; canChange: boolean } | null>(null);
+  const [err, setErr] = useState("");
+  const load = () =>
+    fetch("/api/heart/config")
+      .then((r) => r.json())
+      .then(setSt)
+      .catch(() => setSt(null));
+  useEffect(() => {
+    void load();
+    const t = window.setInterval(() => void load(), 15_000);
+    return () => window.clearInterval(t);
+  }, []);
+  if (!st) return null;
+  const toggle = async (keep: boolean) => {
+    setErr("");
+    const r = await fetch("/api/heart/config", { method: "POST", body: JSON.stringify({ keep }) });
+    if (!r.ok) setErr(((await r.json().catch(() => ({}))) as { error?: string }).error ?? `The desktop answered ${r.status}.`);
+    void load();
+  };
+  return (
+    <>
+      <h4 style={{ marginTop: 14 }}>Keep them running</h4>
+      <label className="check">
+        <input type="checkbox" checked={st.keep} disabled={!st.canChange} onChange={(e) => void toggle(e.target.checked)} />
+        <span>When the desktop on this computer is closed, keep the characters going: their heartbeats, Vector and Discord, and the inbound API</span>
+      </label>
+      <p className="small faint">
+        A minute after the desktop closes, this computer opens it again out of sight, with everything as you left it, and the characters carry on. When you open the desktop, it hands back what happened and steps aside. The
+        copy it starts from is kept sealed on this computer. With accounts, use "Always remember" so it can open.{" "}
+        {st.keep ? (st.keeper ? "Running now, out of sight." : "Ready.") : ""}
+      </p>
+      {!st.canChange ? <p className="note small">This is set on the desktop's own computer.</p> : null}
+      {err ? <p className="small" style={{ color: "var(--warn)" }}>{err}</p> : null}
+    </>
+  );
 }
 
 function AiSection() {
@@ -166,7 +309,7 @@ function AiSection() {
               <span className="faint small">{i + 1}.</span>
               <input className="input" style={{ maxWidth: 240, fontWeight: 600 }} value={c.label} onChange={(e) => patchConn(c.id, { label: e.target.value })} aria-label="Connection name" />
               <span className={`pill ${scope === "device" ? "good" : "warn"}`}>{SCOPE_LABEL[scope]}</span>
-              {f ? <Sensitive /> : null}
+              {f ? <Sensitive feature={f} /> : null}
               <span className="grow" />
               <button className="icon-btn" aria-label="Try earlier" disabled={i === 0} onClick={() => move(c.id, -1)}>
                 <ArrowUp size={14} />
@@ -299,7 +442,7 @@ function LookSection() {
       </label>
       <label className="field" style={{ maxWidth: 380 }}>
         <span>Everything bigger or smaller</span>
-        <Num min={0.75} max={1.5} step={0.05} value={s.uiScale} onChange={(n) => desk().set({ uiScale: n })} percent />
+        <Num min={0.5} max={2} step={0.05} value={s.uiScale} onChange={(n) => desk().set({ uiScale: n })} percent />
       </label>
       <label className="check">
         <input type="checkbox" checked={s.wallpaper} onChange={(e) => desk().set({ wallpaper: e.target.checked })} />
@@ -329,6 +472,85 @@ function LookSection() {
       <p className="small faint" style={{ marginTop: 12 }}>
         Window sizes and positions are remembered on this device. The colour follows whoever is in focus.
       </p>
+      <CatsSettings />
+    </>
+  );
+}
+
+function CatsSettings() {
+  const s = useDesk();
+  const c = s.cats;
+  const set = (patch: Partial<typeof c>) => desk().set({ cats: { ...desk().cats, ...patch } });
+  const change = (id: string, patch: Partial<Cat>) => set({ list: desk().cats.list.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
+  return (
+    <>
+      <h4 style={{ marginTop: 18 }}>Cats</h4>
+      <label className="check">
+        <input type="checkbox" checked={c.on} onChange={(e) => set({ on: e.target.checked })} />
+        <span>Cats on the desktop: they wander, sit, wash and nap on top of everything. Click one to pet it; right-click (or hold) one to feed them. The characters notice them.</span>
+      </label>
+      {c.on ? (
+        <label className="check">
+          <input type="checkbox" checked={c.follow} onChange={(e) => set({ follow: e.target.checked })} />
+          <span>Follow the pointer: they trot after the mouse (or your finger or stylus) and sit beside it.</span>
+        </label>
+      ) : null}
+      {c.on ? (
+        <>
+          <label className="field" style={{ maxWidth: 380 }}>
+            <span>Size</span>
+            <Num min={0.6} max={2.5} step={0.1} value={c.size} onChange={(size) => set({ size })} />
+          </label>
+          {c.list.map((cat, i) => (
+            <div key={cat.id} className="row" style={{ gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+              <input className="input" style={{ width: 160 }} value={cat.name} aria-label="Cat's name" onChange={(e) => change(cat.id, { name: e.target.value })} />
+              <select
+                className="select"
+                aria-label={`${cat.name}'s coat`}
+                value={CAT_COATS.find((x) => x.coat === cat.coat)?.label ?? ""}
+                onChange={(e) => {
+                  const k = CAT_COATS.find((x) => x.label === e.target.value);
+                  if (k) change(cat.id, { coat: k.coat, marks: k.marks, belly: k.belly });
+                }}
+              >
+                {CAT_COATS.find((x) => x.coat === cat.coat) ? null : <option value="">Own colours</option>}
+                {CAT_COATS.map((k) => (
+                  <option key={k.label}>{k.label}</option>
+                ))}
+              </select>
+              <label className="row small" style={{ gap: 4 }} title="Coat">
+                <input type="color" value={cat.coat} onChange={(e) => change(cat.id, { coat: e.target.value })} aria-label={`${cat.name}'s coat colour`} />
+                <input type="color" value={cat.marks} onChange={(e) => change(cat.id, { marks: e.target.value })} aria-label={`${cat.name}'s stripes`} />
+                <input type="color" value={cat.eyes} onChange={(e) => change(cat.id, { eyes: e.target.value })} aria-label={`${cat.name}'s eyes`} />
+              </label>
+              {i === 0 ? (
+                <span className="pill" title="The others give way to her, and don't walk past while she sleeps">
+                  senior
+                </span>
+              ) : (
+                <>
+                  <button className="btn small" onClick={() => set({ list: [cat, ...desk().cats.list.filter((x) => x.id !== cat.id)] })}>
+                    Make senior
+                  </button>
+                  <button className="btn small danger-text" aria-label={`Let ${cat.name} go`} onClick={() => set({ list: desk().cats.list.filter((x) => x.id !== cat.id) })}>
+                    <Trash2 size={13} />
+                  </button>
+                </>
+              )}
+            </div>
+          ))}
+          <button
+            className="btn small"
+            disabled={c.list.length >= 8}
+            onClick={() => {
+              const k = CAT_COATS[(c.list.length + 1) % CAT_COATS.length];
+              set({ list: [...c.list, { id: uid(), name: `Cat ${c.list.length + 1}`, coat: k.coat, marks: k.marks, belly: k.belly, eyes: "#e8c34a" }] });
+            }}
+          >
+            <Plus size={13} /> Another cat
+          </button>
+        </>
+      ) : null}
     </>
   );
 }
@@ -421,13 +643,28 @@ function PrivacySection() {
   const [anon, setAnon] = useState("");
   const set = (patch: Partial<typeof p>) => desk().set({ privacy: { ...desk().privacy, ...patch } });
   const keyholder = s.role() === "keyholder";
+  // arriving from a Sensitive tag elsewhere: scroll to that feature and light it for a moment
+  const [lit, setLit] = useState<string>("");
+  useEffect(() => {
+    const go = () => {
+      const f = sessionStorage.getItem("pdd-privacy-focus");
+      if (!f) return;
+      sessionStorage.removeItem("pdd-privacy-focus");
+      setLit(f);
+      requestAnimationFrame(() => document.getElementById(`privacy-${f}`)?.scrollIntoView({ block: "center", behavior: "smooth" }));
+      window.setTimeout(() => setLit(""), 2400);
+    };
+    go();
+    window.addEventListener("pdd-privacy-focus", go);
+    return () => window.removeEventListener("pdd-privacy-focus", go);
+  }, []);
   return (
     <>
       <h2>
-        Privacy <Sensitive />
+        Privacy <Sensitive plain />
       </h2>
       <p className="lead small">Everything that could leave this computer starts off. Each feature asks you to read what it shares before it can be turned on. The bar at the top always shows “Local only” or that something is going out.</p>
-      {!keyholder ? <div className="note warn small">Only the keyholder can change privacy.</div> : null}
+      {!keyholder ? <div className="note warn small">Only accounts with full access can change privacy.</div> : null}
       <fieldset disabled={!keyholder} style={{ border: 0, padding: 0, margin: 0 }}>
         <h4>What may leave this computer</h4>
         <div style={{ display: "grid", gap: 6, marginBottom: 14 }}>
@@ -452,10 +689,10 @@ function PrivacySection() {
         {FEATURES.map((f) => {
           const on = Boolean(p.consents[f.id]);
           return (
-            <div key={f.id} className="conn" style={{ opacity: p.mode === "none" ? 0.55 : 1 }}>
+            <div key={f.id} id={`privacy-${f.id}`} className={`conn${lit === f.id ? " lit" : ""}`} style={{ opacity: p.mode === "none" ? 0.55 : 1 }}>
               <div className="row">
                 <b>{f.label}</b>
-                <Sensitive />
+                <Sensitive plain />
                 <span className="grow" />
                 {on ? <span className="pill warn">On{p.mode === "conditional" ? ` · ${p.hours.from}–${p.hours.to}` : ""}</span> : <span className="pill">Off</span>}
                 <button
@@ -552,7 +789,7 @@ function AccountsSection() {
     <>
       <h2>Accounts</h2>
       <p className="lead small">
-        Accounts live only on this computer. The first one holds the keys: privacy, Keys, the flood gate and the adult shelf answer to them. An account can have no password (its picture opens it) or a password, kept as a salted hash and never stored as itself.
+        Accounts live on this device, and can travel to your others (each account's switch). The first one holds the keys: privacy, Keys, the flood gate and the adult shelf answer to them. An account can have no password (its picture opens it) or a password, kept as a salted hash and never stored as itself.
       </p>
       {!canSeal() ? <div className="note warn small">Passwords need this page on localhost or https.</div> : null}
       {s.accounts.map((a) => (
@@ -570,18 +807,21 @@ function AccountsSection() {
           ) : (
             <span />
           )}
+          {/* your own account's switch, or any account's for the keyholder */}
+          {s.session === a.name || keyholder ? <TravelSwitch account={a} /> : null}
         </div>
       ))}
+      <FromOtherDevices />
       {keyholder ? (
         <>
-          <h4 style={{ marginTop: 16 }}>{first ? "Create the keyholder account" : "Add an account"}</h4>
+          <h4 style={{ marginTop: 16 }}>{first ? "Create the first account (full access)" : "Add an account"}</h4>
           <div className="row">
             <input className="input" style={{ maxWidth: 200 }} placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} />
             {!first ? (
               <select className="select" style={{ width: 150 }} value={role} onChange={(e) => setRole(e.target.value as Role)}>
                 <option value="resident">Resident</option>
                 <option value="general">Guest</option>
-                <option value="keyholder">Keyholder</option>
+                <option value="keyholder">Full access</option>
               </select>
             ) : null}
             <input className="input" style={{ maxWidth: 200 }} type="password" placeholder="Password (optional)" value={pass} onChange={(e) => setPass(e.target.value)} />
@@ -615,27 +855,42 @@ function AccountsSection() {
 function AdultSection() {
   const s = useDesk();
   const keyholder = s.role() === "keyholder";
+  // the unlock box (a) and the new passcode (fresh, b) are separate: sharing one made phones report "don't match"
   const [a, setA] = useState("");
+  const [fresh, setFresh] = useState("");
   const [b, setB] = useState("");
   const [old, setOld] = useState("");
   const [note, setNote] = useState("");
   const adults = s.allCharacters().filter((c) => c.shelf === "adult");
+  const insecure = !canSeal() ? "Passcodes need this page's secure address (https://…ts.net, or localhost on the computer itself); this one is plain http." : "";
 
   const setCode = async () => {
-    if (a.length < 4) return setNote("Use at least four characters.");
-    if (a !== b) return setNote("Those don't match.");
-    if (s.adult && !(await matches(old, s.adult))) return setNote("The current passcode doesn't match.");
-    desk().set({ adult: await seal(a) });
-    setA("");
+    if (insecure) return setNote(insecure);
+    // phone keyboards can compose the same letters differently: compare them the same way
+    const one = fresh.normalize("NFC"), two = b.normalize("NFC");
+    if (one.length < 4) return setNote("Use at least four characters.");
+    if (one !== two) return setNote(one.length !== two.length ? `Those don't match: one is ${one.length} characters, the other ${two.length}.` : "Those don't match (same length, different characters).");
+    try {
+      if (s.adult && !(await matches(old.normalize("NFC"), s.adult)) && !(await matches(old, s.adult))) return setNote("The current passcode doesn't match.");
+      desk().set({ adult: await seal(one) });
+    } catch (e) {
+      return setNote(e instanceof Error ? e.message : String(e));
+    }
+    setFresh("");
     setB("");
     setOld("");
     setNote("Passcode saved. Setting it doesn't open the shelf; unlocking does.");
   };
   const unlock = async () => {
-    if (s.adult && (await matches(a, s.adult))) {
-      desk().set({ adultOpen: true });
-      setNote("");
-    } else setNote("That passcode doesn't match.");
+    if (insecure) return setNote(insecure);
+    try {
+      if (s.adult && ((await matches(a.normalize("NFC"), s.adult)) || (await matches(a, s.adult)))) {
+        desk().set({ adultOpen: true });
+        setNote("");
+      } else setNote("That passcode doesn't match.");
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e));
+    }
     setA("");
   };
   const lock = () => desk().set({ adultOpen: false, sensorPass: false, members: desk().members.filter((id) => desk().character(id)?.shelf !== "adult") });
@@ -673,14 +928,24 @@ function AdultSection() {
           <h4 style={{ marginTop: 18 }}>{s.adult ? "Change the passcode" : "Set a passcode"}</h4>
           {s.adult ? <input className="input" type="password" style={{ maxWidth: 260, marginBottom: 8 }} placeholder="Current passcode" value={old} onChange={(e) => setOld(e.target.value)} /> : null}
           <div className="row">
-            <input className="input" type="password" style={{ maxWidth: 200 }} placeholder="New passcode" value={s.adultOpen || !s.adult ? a : ""} onChange={(e) => setA(e.target.value)} />
-            <input className="input" type="password" style={{ maxWidth: 200 }} placeholder="Again" value={b} onChange={(e) => setB(e.target.value)} />
+            <input className="input" type="password" autoComplete="new-password" style={{ maxWidth: 200 }} placeholder="New passcode" value={fresh} onChange={(e) => setFresh(e.target.value)} />
+            <input className="input" type="password" autoComplete="new-password" style={{ maxWidth: 200 }} placeholder="Again" value={b} onChange={(e) => setB(e.target.value)} />
             <button className="btn" onClick={() => void setCode()}>
               Save passcode
             </button>
           </div>
         </>
       ) : null}
+      <h4 style={{ marginTop: 18 }}>Toddler mode</h4>
+      <p className="small muted">
+        For little ones: making and watching pictures and music, games, notes and Hangout, with the characters still around but every AI feature resting (AI can cost
+        money). Other apps and Classic are put away. Turning it on asks for nothing (it's also in the top bar's first menu); it stays on after a
+        restart, and only the passcode above turns it off (the 🧸 in the top bar).
+      </p>
+      <button className="btn" disabled={!s.adult} onClick={() => setNote(startToddler())}>
+        Turn on toddler mode
+      </button>
+      {!s.adult ? <span className="small faint" style={{ marginLeft: 8 }}>Set a passcode first.</span> : null}
       {note ? <div className="note small" style={{ marginTop: 10 }}>{note}</div> : null}
     </>
   );
@@ -736,6 +1001,7 @@ function BackupSection() {
   return (
     <>
       <h2>Backup and reset</h2>
+      <OldDesk />
       <p className="lead small">Save the whole desktop (characters, their files, the conversation and settings) to one file, or bring it back. Keys, passwords and the adult passcode never go into the file.</p>
       <div className="row">
         <button className="btn primary" onClick={exportAll}>
@@ -802,7 +1068,7 @@ function DockSection() {
             { id: "top", label: "Top" },
             { id: "float", label: "Floating" },
           ]}
-          onChange={(edge) => set(edge === "float" ? { edge, float: d.float ?? { x: Math.max(4, window.innerWidth / 2 - 200), y: Math.max(40, window.innerHeight - 140), vertical: false } } : { edge })}
+          onChange={(edge) => set(edge === "float" ? { edge, float: d.float ?? { x: Math.max(4, viewW() / 2 - 200), y: Math.max(40, viewH() - 140), vertical: false } } : { edge })}
         />
       </label>
       {d.edge === "float" ? (
@@ -1183,6 +1449,8 @@ function ConversationSection() {
         </label>
       ) : null}
 
+      <KeepRunning />
+
       <h4 style={{ marginTop: 14 }}>When a chat ends</h4>
       <p className="small faint">A chat ends when you start a new one or switch to another. This runs in the background and uses the AI connection.</p>
       <label className="check">
@@ -1192,6 +1460,10 @@ function ConversationSection() {
       <label className="check">
         <input type="checkbox" checked={c.learnFacts} onChange={(e) => set({ learnFacts: e.target.checked })} />
         <span>…and keeps anything they learned in their memory</span>
+      </label>
+      <label className="check">
+        <input type="checkbox" checked={c.storybook} onChange={(e) => set({ storybook: e.target.checked })} />
+        <span>…and writes it as the next scene of that branch's book in their Storybook, in two voices: what happened in the room, and their own thoughts inside</span>
       </label>
 
       <h4 style={{ marginTop: 14 }}>Skills</h4>
@@ -1216,6 +1488,60 @@ function ConversationSection() {
           Export JSONL
         </button>
         {status ? <span className="small muted">{status}</span> : null}
+      </div>
+      <PeopleSettings />
+    </>
+  );
+}
+
+/** The People layer: names first; these labels only when there's no name to use (peopleCore.ts). */
+function PeopleSettings() {
+  const p = useDesk((s) => s.people);
+  const session = useDesk((s) => s.session);
+  const texts = useNotes((s) => s.texts);
+  const set = (patch: Partial<typeof p>) => desk().set({ people: { ...desk().people, ...patch } });
+  const list = dossiers();
+  void texts;
+  const make = async () => {
+    const name = await askText("Whose dossier?", session ?? "", { body: "Their name, as the characters should say it. Their handles (npub, Discord id) can be added in the note.", yes: "Make it" });
+    if (!name?.trim()) return;
+    await loadNotes();
+    const path = freePath(PEOPLE_DIR, safeTitle(name.trim()));
+    await writeNote(path, dossierTemplate(name.trim(), p.personLabel));
+    openNote({ target: path });
+  };
+  return (
+    <>
+      <h4 style={{ marginTop: 18 }}>People</h4>
+      <p className="small muted">
+        The characters call people by their names. A person's dossier (a note in Vault › {PEOPLE_DIR}) holds their name, the handles they're known by and
+        their label. These labels are only for when there's no name to use.
+      </p>
+      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <label className="field" style={{ maxWidth: 200 }}>
+          <span>A person, by default</span>
+          <input className="input" value={p.personLabel} placeholder={REL_DEFAULT.personLabel} onChange={(e) => set({ personLabel: e.target.value })} />
+        </label>
+        <label className="field" style={{ maxWidth: 280 }}>
+          <span>Someone else</span>
+          <input className="input" value={p.peerLabel} placeholder={REL_DEFAULT.peerLabel} onChange={(e) => set({ peerLabel: e.target.value })} />
+        </label>
+        <label className="field" style={{ maxWidth: 200 }}>
+          <span>The household</span>
+          <input className="input" value={p.companyLabel} placeholder={REL_DEFAULT.companyLabel} onChange={(e) => set({ companyLabel: e.target.value })} />
+        </label>
+      </div>
+      <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <button className="btn small" onClick={() => void make()}>
+          <Plus size={13} /> A dossier for someone
+        </button>
+        {list.length ? (
+          <span className="small faint">
+            {list.length} dossier{list.length === 1 ? "" : "s"}: {list.map((d) => `${d.name}${d.label ? ` (${d.label})` : ""}`).join(", ")}
+          </span>
+        ) : (
+          <span className="small faint">No dossiers yet.</span>
+        )}
       </div>
     </>
   );
@@ -1387,6 +1713,211 @@ function ClassicSection() {
       <button className="btn primary" onClick={() => desk().set({ classic: true })}>
         Open Classic
       </button>
+      <ClassicPairs />
+    </>
+  );
+}
+
+type Pairing = { id: string; name: string; created: number; used: number; origin: string };
+
+/** Classic opened on its own (a plain browser tab, anywhere on the network) can borrow this desktop's relay, to
+ *  get past servers that block pages (CORS). Each pairing has its own code, made here and removable here. */
+function ClassicPairs() {
+  const [data, setData] = useState<{ pairs: Pairing[]; canChange: boolean; addresses: string[]; lan: boolean } | null>(null);
+  const [made, setMade] = useState<{ name: string; token: string } | null>(null);
+  const [address, setAddress] = useState("");
+  const [name, setName] = useState("");
+  const [err, setErr] = useState("");
+  const load = () =>
+    fetch("/api/pairs")
+      .then((r) => r.json())
+      .then((d) => {
+        setData(d);
+        setAddress((a) => a || d.addresses[d.lan && d.addresses.length > 1 ? 1 : 0]);
+      })
+      .catch(() => setData(null));
+  useEffect(() => void load(), []);
+  const post = async (body: unknown) => {
+    setErr("");
+    const r = await fetch("/api/pairs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || `It answered ${r.status}.`);
+    return j;
+  };
+  if (!data) return null;
+  const code = made ? `${address}#${made.token}` : "";
+  const when = (t: number) => (t ? new Date(t).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "never");
+  return (
+    <div style={{ marginTop: 18 }}>
+      <h3 style={{ margin: "0 0 4px" }}>Classic opened elsewhere</h3>
+      <p className="small muted" style={{ margin: "0 0 8px" }}>
+        Pandora Dee or Jade Vault open on their own, in any browser tab, can send their requests through this desktop, so servers that block pages
+        (CORS: many MCP servers, a local Ollama, SearXNG) still answer. Make a pairing code here and paste it into Classic (Config → Connect →
+        Pair with PDA SEASIDE). A paired page can use the relay and nothing else of the desktop. A request that may already have arrived is never sent
+        twice.
+      </p>
+      {data.pairs.length ? (
+        <ul className="small" style={{ listStyle: "none", padding: 0, margin: "0 0 8px" }}>
+          {data.pairs.map((p) => (
+            <li key={p.id} className="row" style={{ gap: 8, padding: "3px 0" }}>
+              <b>{p.name}</b>
+              <span className="faint grow">
+                made {when(p.created)} · last used {when(p.used)}
+                {p.origin ? ` from ${p.origin}` : ""}
+              </span>
+              {data.canChange ? (
+                <button className="btn small danger-text" onClick={() => void post({ op: "remove", id: p.id }).then(load, (e: Error) => setErr(e.message))}>
+                  Remove
+                </button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {data.canChange ? (
+        <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+          <input className="input" style={{ maxWidth: 240 }} value={name} placeholder="Which Classic? e.g. Pandora on the laptop" aria-label="Name for the pairing" onChange={(e) => setName(e.target.value)} />
+          <button
+            className="btn"
+            onClick={() =>
+              void post({ op: "add", name: name || "Classic" }).then(
+                (p: { name: string; token: string }) => (setMade(p), setName(""), load()),
+                (e: Error) => setErr(e.message),
+              )
+            }
+          >
+            Make a pairing code
+          </button>
+        </div>
+      ) : (
+        <p className="small faint">Pairing codes are made on the desktop's own computer.</p>
+      )}
+      {made ? (
+        <div className="note small" style={{ marginTop: 8 }}>
+          <div style={{ marginBottom: 4 }}>
+            <b>{made.name}</b>: paste this into Classic. It's shown only now (the desktop keeps only a fingerprint of it).
+          </div>
+          <label className="row" style={{ gap: 6, marginBottom: 4 }}>
+            <span className="faint">Classic reaches this desktop at</span>
+            <select className="select" style={{ width: "auto" }} value={address} onChange={(e) => setAddress(e.target.value)} aria-label="The desktop's address for Classic">
+              {data.addresses.map((a) => (
+                <option key={a} value={a}>
+                  {a}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="row" style={{ gap: 6 }}>
+            <code className="grow" style={{ wordBreak: "break-all" }}>
+              {code}
+            </code>
+            <button className="btn small" onClick={() => void copyText(code).then(() => desk().say("Pairing code copied."))}>
+              Copy
+            </button>
+            <button className="btn small ghost" onClick={() => setMade(null)}>
+              Done
+            </button>
+          </div>
+          {!data.lan && address !== data.addresses[0] ? (
+            <div className="faint" style={{ marginTop: 4 }}>
+              The desktop isn't shared on the network yet, so only Classic on this computer can reach it (use the localhost address, or share it first).
+            </div>
+          ) : null}
+          <div className="faint" style={{ marginTop: 4 }}>
+            Classic on an https page (GitHub Pages, an artifact) can reach a desktop only at https or localhost: browsers block plain http addresses from
+            https pages.
+          </div>
+        </div>
+      ) : null}
+      {err ? <p className="small bad-text">{err}</p> : null}
+    </div>
+  );
+}
+
+function MemorySection() {
+  const s = useDesk();
+  const m = s.memory;
+  const set = (patch: Partial<typeof m>) => desk().set({ memory: { ...desk().memory, ...patch } });
+  const [srv, setSrv] = useState<ServerMemory | null>(null);
+  const [page, setPage] = useState(pageMemory());
+  const [note, setNote] = useState("");
+  const load = () => void memoryApi.status().then((x) => setSrv(x?.server ? x : null), () => setSrv(null));
+  useEffect(() => {
+    load();
+    const t = window.setInterval(() => (load(), setPage(pageMemory())), 5000);
+    return () => window.clearInterval(t);
+  }, []);
+  const act = async (body: Record<string, unknown>, said: (x: ServerMemory & { freed?: { mb: number }; slept?: boolean }) => string) => {
+    try {
+      const x = (await memoryApi.post(body)) as ServerMemory & { freed?: { mb: number }; slept?: boolean };
+      setSrv(x);
+      setNote(said(x));
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e));
+    }
+  };
+  const minutes = (n: number) => (n ? `${n} min` : "off");
+  return (
+    <>
+      <h2>Memory</h2>
+      <p className="lead small">Keep SEASIDE light: on this device (each one chooses for itself), and on the desktop's computer. Everything here is off until you switch it on.</p>
+
+      <h4>This device</h4>
+      <p className="small muted">
+        {page !== null ? `This page is using about ${page} MB. ` : ""}
+        Unloading frees a window's contents; it opens again where it was. Windows that are busy are left alone: sound or video playing in them, a game in
+        progress, Vector.
+      </p>
+      <label className="field" style={{ maxWidth: 420 }}>
+        <span>Unload windows minimized for longer than ({minutes(m.unloadMinimizedMin)})</span>
+        <Num min={0} max={240} step={5} value={m.unloadMinimizedMin} onChange={(n) => set({ unloadMinimizedMin: n })} />
+      </label>
+      <label className="field" style={{ maxWidth: 420 }}>
+        <span>Free all minimized windows after this long in the background ({minutes(m.freeHiddenMin)})</span>
+        <Num min={0} max={240} step={5} value={m.freeHiddenMin} onChange={(n) => set({ freeHiddenMin: n })} />
+      </label>
+      <button
+        className="btn"
+        onClick={() => {
+          const n = unloadMinimized();
+          setNote(n ? `${n} minimized window${n === 1 ? "" : "s"} freed.` : "Nothing to free: no minimized windows that aren't busy.");
+        }}
+      >
+        Free minimized windows now
+      </button>
+
+      <h4 style={{ marginTop: 18 }}>The desktop's computer</h4>
+      {srv ? (
+        <>
+          <p className="small muted">
+            The server is using {srv.server.rss} MB ({srv.server.heap} MB of it its own working memory). The computer has {srv.computer.free} MB free of{" "}
+            {srv.computer.total} MB. The full browser is {srv.engine.running ? (srv.engine.viewers ? "running, with someone watching" : `running, unwatched for ${srv.engine.idleMin} min`) : "asleep"}.
+          </p>
+          <label className="field" style={{ maxWidth: 420 }}>
+            <span>Put the full browser to sleep after nobody's watched or used it for ({minutes(srv.settings.engineSleepMin)})</span>
+            <Num min={0} max={240} step={5} value={srv.settings.engineSleepMin} onChange={(n) => void act({ op: "set", engineSleepMin: n }, () => "")} />
+          </label>
+          <p className="small faint" style={{ marginTop: -4 }}>
+            It wakes when it's next opened. Its tabs come back where they were when “Remember where I left off” is on (Browser settings); otherwise they close.
+          </p>
+          <label className="field" style={{ maxWidth: 420 }}>
+            <span>Clean up the server's memory every ({minutes(srv.settings.cleanEveryMin)})</span>
+            <Num min={0} max={240} step={5} value={srv.settings.cleanEveryMin} onChange={(n) => void act({ op: "set", cleanEveryMin: n }, () => "")} />
+          </label>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <button className="btn" disabled={!srv.canClean} onClick={() => void act({ op: "clean" }, (x) => `Cleaned up: ${x.freed?.mb ?? 0} MB given back.`)}>
+              Clean up now
+            </button>
+            <button className="btn" disabled={!srv.canChange || !srv.engine.running} onClick={() => void act({ op: "sleep-engine" }, (x) => (x.slept ? "The full browser is asleep." : "It was already asleep."))}>
+              Put the full browser to sleep now
+            </button>
+          </div>
+          {!srv.canChange ? <p className="small faint">The schedules are set on the desktop's own computer.</p> : null}
+        </>
+      ) : (
+        <p className="small faint">The desktop's server hasn't been restarted since this arrived; restart it to see and change its memory here.</p>
+      )}
+      {note ? <div className="note small" style={{ marginTop: 10 }}>{note}</div> : null}
     </>
   );
 }
@@ -1527,10 +2058,10 @@ function ServerBackup() {
     <>
       <div className="divider" />
       <h4>
-        Backups to your own server <Sensitive />
+        Backups to your own server <Sensitive feature="backup" />
       </h4>
       <p className="small muted">
-        Works with the backup server from Jade Vault (<span className="mono">jade-backup-server.py</span>): run it on a machine that's always on and paste its address and token here. Encrypted backups are locked here with your passphrase before they leave; there's no way back in if the passphrase is lost.
+        Works with the backup server from Jade Vault (<span className="mono">jade-backup-server.py</span>): run it on a machine that's always on and paste its address and token here. It listens on port 8787 unless told otherwise, the same port as the Vector bridge, so on a computer that runs both, start it with <span className="mono">--port 8790</span>. Encrypted backups are locked here with your passphrase before they leave; there's no way back in if the passphrase is lost.
       </p>
       {!ok ? (
         <div className="note small" style={{ marginBottom: 10 }}>
@@ -1649,4 +2180,52 @@ function ServerBackup() {
 function openSettingsSection(section: string) {
   sessionStorage.setItem("pdd-settings-section", section);
   window.dispatchEvent(new CustomEvent("pdd-settings", { detail: section }));
+}
+
+/** A desk this device had before the desk was shared: what it has, bringing things in, or keeping it (legacy mode). */
+function OldDesk() {
+  const legacy = typeof localStorage !== "undefined" && localStorage.getItem("pdd-desk-mode") === "legacy";
+  const old = oldDesk();
+  const [pick, setPick] = useState({ chars: true, files: true, chats: true, conns: true, keys: false });
+  const [note, setNote] = useState("");
+  if (legacy)
+    return (
+      <div className="note small" style={{ marginBottom: 12 }}>
+        <b>This device keeps its own desk.</b> It isn't part of the shared desk your other devices use.{" "}
+        <button className="btn small" onClick={() => joinSharedDesk()}>
+          Join the shared desk
+        </button>
+        <p className="faint" style={{ margin: "4px 0 0" }}>Its own desk is set aside safely when it joins, to bring things in from.</p>
+      </div>
+    );
+  if (!old?.state) return null;
+  const has = whatItHas();
+  const row = (k: keyof typeof pick, label: string, n: number, list: string[]) => (
+    <label className="check" style={{ padding: "2px 0" }}>
+      <input type="checkbox" checked={pick[k]} disabled={!n} onChange={(e) => setPick({ ...pick, [k]: e.target.checked })} />
+      <span>
+        {label} ({n}){n ? <span className="faint"> · {list.slice(0, 4).join(", ")}{list.length > 4 ? "…" : ""}</span> : null}
+      </span>
+    </label>
+  );
+  return (
+    <div className="note small" style={{ marginBottom: 12 }}>
+      <b>This device's old desk</b>
+      <p style={{ margin: "4px 0 6px" }}>What this device had here before the desk was shared, and isn't in the shared desk yet. A file both have differently comes in beside the shared one, so nothing is replaced.</p>
+      {row("chars", "Characters", has.chars.length, has.chars.map((c) => c.name))}
+      {row("files", "Characters' files", has.files.length, has.files)}
+      {row("chats", "Chats", has.chats.length, has.chats.map((c) => c.title))}
+      {row("conns", "AI connections", has.conns.length, has.conns.map((c) => c.label))}
+      {row("keys", "Keys (their values come from this device)", has.keys.length, has.keys)}
+      <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+        <button className="btn small primary" onClick={() => setNote(bringIn(pick) ? "Brought into the shared desk." : "Nothing new to bring in.")}>
+          Bring the ticked ones in
+        </button>
+        <button className="btn small" onClick={() => void askUser("Keep this device on its own desk?", "It goes back to the desk it had here, and stops taking part in the shared desk. Your other devices aren't affected. You can join the shared desk again from here.", "Keep its own desk", "Cancel").then((y) => y && keepOwnDesk())}>
+          Keep this device on its own desk
+        </button>
+      </div>
+      {note ? <p style={{ margin: "6px 0 0" }}>{note}</p> : null}
+    </div>
+  );
 }

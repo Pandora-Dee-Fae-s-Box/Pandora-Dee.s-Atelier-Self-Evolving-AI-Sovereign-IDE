@@ -1,6 +1,6 @@
 # Notices and credits
 
-Pandora Dee's Atelier (Pandora Dee Desktop) builds on other people's work. Each part keeps its own license.
+Pandora Dee's Atelier (PDA SEASIDE) builds on other people's work. Each part keeps its own license.
 
 ## The apps it grows from
 
@@ -43,15 +43,19 @@ The crunch sound in Cook and Eat ("Human Eating_Crunch - Sound Effect (HD)") is 
 
 ## Webxdc apps by others
 
-Not part of this repository: people bring them into their own library. They're listed so their makers get the
-credit, and so the desktop's update check (Games & Apps → Check for updates, or `npm run check-upstreams`)
-knows where newer releases come from. Each keeps its own license.
+Shared with this ecosystem to be played and built on together, they **come with the desktop**: the files are in
+`public/apps/` (listed in `shipped.json`, with each one's maker, home and license where it states one) and are added
+to each library once, so one someone removes stays removed. Each keeps its own license and credit. The desktop's
+update check (Games & Apps → Check for updates, or `npm run check-upstreams`) follows where newer releases come from.
+Where a maker publishes release files, the shipped copy is that file, checked against the release's checksum; the
+others are the copies their makers shared. SNES (xdc) isn't shipped yet: there's no release file to ship.
 
 | App | Made by | Source |
 | --- | --- | --- |
 | XDC-Chess | th2tran | https://github.com/th2tran/chess-webxdc |
 | Aurum Chess | th2tran | https://github.com/th2tran/aurum-chess-xdc |
 | Gomoku | th2tran | https://github.com/th2tran/gomoku-webxdc |
+| MachStrike | th2tran | https://github.com/th2tran/flightsim-xdc |
 | SNES (xdc) | th2tran | https://github.com/th2tran/snes-xdc |
 | Vexel | JSKitty | https://github.com/JSKitty/Vexel |
 | Arcane Dungeon | ArcaneCircle | https://github.com/ArcaneCircle/pixel-dungeon |
@@ -69,6 +73,15 @@ knows where newer releases come from. Each keeps its own license.
 | SID-STEP | AETHER-ENGINEERS | https://github.com/AETHER-ENGINEERS/sid-step |
 | Strudel | AETHER-ENGINEERS | https://github.com/AETHER-ENGINEERS/OMARG-Vector-strudel |
 | XDC Forge | AETHER-ENGINEERS | https://github.com/AETHER-ENGINEERS/vector-xdc-forge |
+| Jade Cat Girl | Lucky | shared on Vector |
+| Local LLM Chat | Lucky | shared on Vector |
+| Tiny Linux | Lucky | shared on Vector |
+| Forts | Henky | shared on Vector |
+| Starlight on Whisker Street | Ice Cream Ghost Cat (SunkissedButterfly), who also made its art | shared on Vector |
+| Ashen Tides: The Dragon Concord | Henky (to confirm) | shared on Vector |
+| The Path of the Fool: Deep Descent | Libra; music by Mrrowr-murrr, Oknytt and Libra's Claude | shared on Vector |
+| Container | Doctor Todd (to confirm) | shared on Vector |
+| AtariSynth | Lucky or Henky (to confirm) | shared on Vector |
 
 Commercial games (RuneScape, Jazz Jackrabbit, Half-Life) are never included: people import their own copies.
 
@@ -91,6 +104,10 @@ Commercial games (RuneScape, Jazz Jackrabbit, Half-Life) are never included: peo
 | three.js, @pixiv/three-vrm (VRM avatars) | MIT |
 | Live2D Cubism Core for Web (`public/vendor/live2dcubismcore.min.js`) | **Live2D Proprietary Software License**: the "Redistributable Code", allowed inside apps under Live2D's terms (https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html). Publishers above Live2D's revenue threshold need a Live2D publication license. Copied unchanged from the Classic build by `scripts/extract-cubism.mjs`. |
 | Vite, TypeScript (build tools) | MIT, Apache-2.0 |
+| @duckduckgo/autoconsent (the browser says no to cookie banners), with its rules | MPL-2.0 |
+| Playwright (playwright-core: drives the browser's engine) | Apache-2.0 |
+
+The browser's tracker blocking uses DuckDuckGo's tracker list (Tracker Radar, https://github.com/duckduckgo/tracker-blocklists, CC BY-NC-SA 4.0). It isn't included here: the desktop fetches it from DuckDuckGo when blocking is on, and uses it unchanged.
 
 ## Avatars
 

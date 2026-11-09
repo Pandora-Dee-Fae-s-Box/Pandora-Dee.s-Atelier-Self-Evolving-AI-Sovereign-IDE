@@ -2,10 +2,12 @@
 // Builds Vector's own app in PDA SEASIDE host mode (see vector-host/files/src-tauri/src/pda_host.rs) from a
 // checkout of https://github.com/VectorPrivacy/Vector, and puts it where the desktop looks for it.
 //
-//   node vector-host/build.mjs --vector F:\pandora-work\repos\Vector --out F:\pandora-data\vector-host\app
-//     [--msvc F:\pandora-work\msvc]        Windows: a portable MSVC folder (with setup_x64.bat), if Visual Studio isn't installed
-//     [--target F:\pandora-work\vector-target]   where cargo builds (5–10 GB)
-//     [--cargo-home F:\pandora-work\cargo-home]  where cargo keeps downloaded crates
+//   node vector-host/build.mjs --vector <checkout of Vector> --out <data folder>/vector-host/app
+//     [--msvc <folder>]        Windows: a portable MSVC folder (with setup_x64.bat), if Visual Studio isn't installed
+//     [--cmake <folder>]       a CMake folder, if cmake isn't on PATH (Vector 0.5.1 and later need it)
+//     [--ninja <folder>]       a folder with ninja, for CMake to build with (with portable MSVC)
+//     [--target <folder>]      where cargo builds (5–10 GB)
+//     [--cargo-home <folder>]  where cargo keeps downloaded crates
 //     [--no-build]                          only add host mode to the checkout
 //
 // The checkout gets three new files and a few marked lines in src-tauri/src/lib.rs; a normal build of it
@@ -58,10 +60,14 @@ const nl = lib.includes("\r\n") ? "\r\n" : "\n";
 // [where, replacement]: each place must be found exactly once, or the build stops and says which
 const edits = [
   ["mod commands;", `mod commands;${nl}mod pda_host; ${MARK}`],
-  [
-    ".run(tauri::generate_context!())",
-    `.run({ let mut context = tauri::generate_context!(); pda_host::adjust(&mut context); context }) ${MARK}`,
-  ],
+  // where Vector makes its app context: inline in .run() before 0.5.1, on its own line from 0.5.1 (then read by
+  // webview_cache::block for the identifier, so host mode's own identifier has to be in place first)
+  {
+    any: [
+      [".run(tauri::generate_context!())", `.run({ let mut context = tauri::generate_context!(); pda_host::adjust(&mut context); context }) ${MARK}`],
+      ["let context = tauri::generate_context!();", `let mut context = tauri::generate_context!();${nl}    pda_host::adjust(&mut context); ${MARK}`],
+    ],
+  },
   [
     'let window = app.get_webview_window("main").unwrap();',
     `pda_host::open_window(app.handle())?; ${MARK}: its hidden bridge window${nl}            let window = app.get_webview_window("main").unwrap();`,
@@ -89,10 +95,12 @@ const edits = [
 ];
 if (lib.includes(MARK)) console.log("Host mode is already in this checkout's lib.rs.");
 else {
-  for (const [find, put] of edits) {
-    const n = lib.split(find).length - 1;
-    if (n !== 1) fail(`lib.rs: expected "${find}" once, found it ${n} times. Vector has changed here; vector-host/build.mjs needs updating.`);
-    lib = lib.replace(find, put);
+  for (const edit of edits) {
+    // an edit is [find, put], or { any: [[find, put], …] } for a place Vector has written more than one way
+    const choices = Array.isArray(edit) ? [edit] : edit.any;
+    const hit = choices.find(([find]) => lib.split(find).length - 1 === 1);
+    if (!hit) fail(`lib.rs: expected ${choices.map(([find]) => `"${find}"`).join(" or ")} once. Vector has changed here; vector-host/build.mjs needs updating.`);
+    lib = lib.replace(hit[0], hit[1]);
   }
   fs.writeFileSync(libPath, lib);
   console.log("Added host mode to src-tauri/src/lib.rs.");
@@ -112,11 +120,17 @@ function swapAppData(dir) {
       if (!found) continue;
       text = text.replace(/\.app_data_dir\(\)/g, ".pda_app_data_dir()");
       if (!text.includes(USE)) {
-        // after the file's own inner docs and attributes (//! and #![…]), which have to come first
+        // after the file's own inner docs and attributes (//! and #![…]), which have to come first, even when
+        // ordinary comments sit between them (0.5.1's native_notify has "// …" before its #![cfg_attr])
         const lines = text.split(/\r?\n/);
         let at = 0;
-        while (at < lines.length && /^\s*(\/\/!|#!\[|$)/.test(lines[at])) at++;
-        lines.splice(at, 0, USE);
+        let after = 0;
+        while (at < lines.length && /^\s*(\/\/|#!\[|$)/.test(lines[at])) {
+          if (/^\s*#!\[/.test(lines[at])) while (at < lines.length - 1 && !/\]\s*$/.test(lines[at])) at++; // one spread over lines
+          if (/^\s*(\/\/!|#!\[)/.test(lines[at]) || /\]\s*$/.test(lines[at])) after = at + 1;
+          at++;
+        }
+        lines.splice(after, 0, USE);
         text = lines.join(nl);
       }
       fs.writeFileSync(full, text);
@@ -151,13 +165,27 @@ if (msvc) {
   // Microsoft's tools go with Rust's MSVC toolchain, whatever this computer's default is
   env.RUSTUP_TOOLCHAIN ||= "stable-x86_64-pc-windows-msvc";
 }
+// CMake (and Ninja for it to drive, rather than a Visual Studio it won't find): Vector 0.5.1's Opus codec builds
+// with them. Folders that hold cmake.exe / ninja.exe, or a CMake folder whose bin/ does.
+for (const name of ["cmake", "ninja"]) {
+  const dir = arg(name);
+  if (!dir) continue;
+  const exe = win ? `${name}.exe` : name;
+  const bin = [dir, path.join(dir, "bin")].find((d) => fs.existsSync(path.join(d, exe)));
+  if (!bin) fail(`No ${exe} in ${dir} (--${name}).`);
+  env.PATH = [path.resolve(bin), env.PATH].join(path.delimiter);
+  if (name === "ninja") env.CMAKE_GENERATOR = "Ninja";
+}
 if (arg("target")) env.CARGO_TARGET_DIR = path.resolve(arg("target"));
 if (arg("cargo-home")) env.CARGO_HOME = path.resolve(arg("cargo-home"));
 // quicker than Vector's release settings (whole-program LTO, one codegen unit), and nearly as quick to run
 env.CARGO_PROFILE_RELEASE_LTO = "thin";
 env.CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "16";
 
-if (!fs.existsSync(path.join(vector, "node_modules"))) run("npm", ["ci"], { cwd: vector });
+// installed again whenever Vector's lock file is newer than what's installed (0.5.1 added three.js, for one)
+const installed = path.join(vector, "node_modules", ".package-lock.json");
+const stale = !fs.existsSync(installed) || fs.statSync(path.join(vector, "package-lock.json")).mtimeMs > fs.statSync(installed).mtimeMs;
+if (stale) run("npm", ["ci"], { cwd: vector });
 run("node", ["scripts/build-frontend.mjs"], { cwd: vector });
 // without Whisper and Tor (they need extra build tools); custom-protocol: serve the built interface, not a dev server
 run("cargo", ["build", "--release", "--no-default-features", "--features", "tauri/custom-protocol"], { cwd: path.join(vector, "src-tauri"), env });

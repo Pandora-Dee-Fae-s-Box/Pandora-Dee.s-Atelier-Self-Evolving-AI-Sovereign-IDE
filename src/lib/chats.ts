@@ -7,7 +7,10 @@ import { endOfChat, isRunning } from "./agent.ts";
 
 const DIR = ".pandora/chats";
 const fileOf = (id: string) => `${DIR}/${id}.json`;
-const UNTITLED = "New chat";
+// A new chat is a new branch (Pandora Dee Fae's Vault Tree): chats are branches, what grows from them are leaves.
+const UNTITLED = "New branch";
+/** Untitled, under either name ("New chat" is what older chats were saved as). */
+export const isUntitled = (t: string) => t === UNTITLED || t === "New chat";
 
 async function writeChat(meta: ChatMeta, messages: Message[]) {
   await fetch(`/api/vault/file?path=${encodeURIComponent(fileOf(meta.id))}`, { method: "PUT", body: JSON.stringify({ meta, messages }) });
@@ -40,7 +43,7 @@ export function currentChat(): ChatMeta {
   const meta = s.chats.find((c) => c.id === s.chatId) ?? { id: s.chatId, title: UNTITLED, created: Date.now(), updated: Date.now(), count: 0 };
   return {
     ...meta,
-    title: meta.title === UNTITLED ? titleFrom(s.messages) : meta.title,
+    title: isUntitled(meta.title) ? titleFrom(s.messages) : meta.title,
     count: s.messages.length,
     updated: s.messages[s.messages.length - 1]?.at ?? meta.updated,
   };
@@ -75,11 +78,12 @@ export async function newChat(title = ""): Promise<string> {
   if (why) return why;
   const s = desk();
   const leaving = s.messages;
+  const branch = currentChat();
   if (leaving.length) await saveOpenChat();
   const id = uid();
   const meta: ChatMeta = { id, title: title.trim() || UNTITLED, created: Date.now(), updated: Date.now(), count: 0 };
   desk().set({ chats: [...desk().chats.filter((c) => c.count > 0 || c.id !== s.chatId || leaving.length), meta], chatId: id, messages: [] });
-  if (leaving.length) endOfChat(leaving);
+  if (leaving.length) endOfChat(leaving, { id: branch.id, title: branch.title });
   return "";
 }
 
@@ -89,12 +93,13 @@ export async function switchChat(id: string): Promise<string> {
   const why = busyReason();
   if (why) return why;
   const leaving = s.messages;
+  const branch = currentChat();
   if (leaving.length) await saveOpenChat();
   const messages = await loadChat(id);
   // An empty chat that was never used isn't worth keeping.
   const keep = desk().chats.filter((c) => c.id !== s.chatId || leaving.length);
   desk().set({ chatId: id, messages, chats: keep });
-  if (leaving.length) endOfChat(leaving);
+  if (leaving.length) endOfChat(leaving, { id: branch.id, title: branch.title });
   return "";
 }
 
