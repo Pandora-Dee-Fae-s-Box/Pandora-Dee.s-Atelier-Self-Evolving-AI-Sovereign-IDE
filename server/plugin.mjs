@@ -9,12 +9,44 @@ import { classicRelayScript, helperScript, webxdcScript } from "./inject.mjs";
 import { sshOp } from "./ssh.mjs";
 import { inbound } from "./inbound.mjs";
 import { relay } from "./relay.mjs";
-import { createMusic, listFolders } from "./music.mjs";
+import { createMusic, knownPlace, listFolders } from "./music.mjs";
+import { createLibrary as createLinked } from "./library.mjs";
 import { createAvatars } from "./avatars.mjs";
 import { createCreative } from "./creative.mjs";
 import { createBrowser } from "./browse.mjs";
 import { createVector } from "./vector.mjs";
 import { createVectorHost } from "./vectorHost.mjs";
+import { createFiles } from "./files.mjs";
+import { createDevShare, isDevicePath } from "./devshare.mjs";
+import { createTravel } from "./travel.mjs";
+import { createEngine } from "./engine.mjs";
+import { createUngoogled, DOWNLOADS } from "./ungoogled.mjs";
+import { createVecMem } from "./vecmem.mjs";
+import { createMcpStdio } from "./mcpstdio.mjs";
+import { createResidentKeys } from "./residentKeys.mjs";
+import { createHeart } from "./heart.mjs";
+import { createDeskState } from "./deskState.mjs";
+import { createLan } from "./lan.mjs";
+import { createBodies } from "./bodies.mjs";
+import { createModules } from "./modules.mjs";
+import { createTheater, PIECE_MAX, VIDEO_EXT } from "./theater.mjs";
+import { createPairs, pairedCors } from "./pairs.mjs";
+import { acceptSocket } from "./wsframes.mjs";
+import { createPads } from "./pads.mjs";
+import { createMemory } from "./memory.mjs";
+import { createLuanti } from "./luanti.mjs";
+import { createLuantiWeb } from "./luantiWeb.mjs";
+import { createLuantiRelay } from "./luantiRelay.mjs";
+import { openDuplex } from "./wsduplex.mjs";
+import { createTerminals } from "./terminal.mjs";
+import { ensureKey, sshShell } from "./terminalSsh.mjs";
+import { createPadsWire } from "./padsWire.mjs";
+import { createRequire } from "node:module";
+import { createPeers } from "./peers.mjs";
+import { createPadsLink } from "./padsLink.mjs";
+import os from "node:os";
+import dns from "node:dns";
+import { createHash } from "node:crypto";
 import { checkUpdates, download } from "./upstreams.mjs";
 import * as aicordAuth from "./oauth.mjs";
 import { findCurl, findPython, forgetPrograms } from "./programs.mjs";
@@ -48,6 +80,11 @@ const MIME = {
   flac: "audio/flac",
   aac: "audio/aac",
   mp4: "video/mp4",
+  m4v: "video/mp4",
+  mkv: "video/x-matroska",
+  "3gp": "video/3gpp",
+  ogv: "video/ogg",
+  avi: "video/x-msvideo",
   webm: "video/webm",
   ttf: "font/ttf",
   otf: "font/otf",
@@ -84,16 +121,160 @@ export function deskServer() {
   const vector = () => (vec ??= createVector(() => dataDir));
   let vh;
   const vectorHost = () => (vh ??= createVectorHost(() => dataDir));
+  // PDD_CONFIG: another settings file (a test copy keeps its own, so it never changes the real desktop's)
+  const configFile = () => process.env.PDD_CONFIG || path.join(root, "pdd.config.json");
+  // pdd.config.json: this computer's own settings for the desktop (data folder, network sharing, …), kept whole
+  const readConfig = () => {
+    try {
+      return JSON.parse(fs.readFileSync(configFile(), "utf8"));
+    } catch {
+      return {};
+    }
+  };
+  const writeConfig = (patch) => fs.writeFileSync(configFile(), JSON.stringify({ ...readConfig(), ...patch }, null, 2));
+  let fl;
+  const files = () =>
+    (fl ??= createFiles({
+      dataDir: () => dataDir,
+      musicFolders: () => music().folders(),
+      videoFolders: () => theater.folders(),
+      getWholePc: () => readConfig().filesWholeComputer === true,
+      setWholePc: (on) => writeConfig({ filesWholeComputer: on }),
+      getSharing: () => readConfig().filesSharing,
+      setSharing: (s) => writeConfig({ filesSharing: s }),
+    }));
+  // other devices sharing their own files, while their page is open (see devshare.mjs)
+  const devices = createDevShare();
+  // folders linked for the characters to read, without copying them in (see library.mjs)
+  const linked = createLinked({ dataDir: () => dataDir });
+  // accounts that travel between devices (see travel.mjs)
+  const travel = createTravel(() => dataDir);
+  // the full browser: a real Chromium-family engine shown live in the Browser window (see engine.mjs)
+  const deskPorts = new Set();
+  const vecmem = createVecMem({ dataDir: () => dataDir });
+  const residentKeys = createResidentKeys({ dataDir: () => dataDir });
+  const bodies = createBodies({ dataDir: () => dataDir });
+  // real terminals (terminal.mjs): node-pty is loaded only when one is opened, so SEASIDE still runs without it
+  let ptySpawn = null;
+  const termKeyDir = () => path.join(dataDir, "terminal");
+  const terminals = createTerminals({
+    dataDir: () => dataDir,
+    // shells under a separate account: an SSH login to this computer with SEASIDE's own key (terminalSsh.mjs)
+    separate: (opts) => sshShell({ ...opts, privateKey: ensureKey(termKeyDir()).privateKey }),
+    keyFor: () => ensureKey(termKeyDir()).publicKey,
+    spawn: (...a) => {
+      ptySpawn ||= createRequire(import.meta.url)("@lydell/node-pty").spawn;
+      return ptySpawn(...a);
+    },
+  });
+  const modules = createModules({ dataDir: () => dataDir, importXdc: (bytes, name) => library().importAny(bytes, name) });
+  const stdio = createMcpStdio();
+  // Media Theater: videos kept in the vault (see theater.mjs)
+  const theater = createTheater({ vaultDir: () => path.join(dataDir, "vault") });
+  // Classic opened on its own (a plain browser tab), paired with this desktop to use its relay (see pairs.mjs)
+  const pairs = createPairs({ file: () => path.join(dataDir, "classic-pairs.json") });
+  // PADS: the account's devices, what's on them, and how they're arranged (see pads.mjs)
+  const pads = createPads({ dataDir: () => dataDir });
+  // PADS's live wire (padsWire.mjs): a mouse and keyboard crossing between an account's devices
+  const padsWire = createPadsWire({ pads });
+  // linked servers (one per device): PADS and "Send to" across all of them (see peers.mjs, padsLink.mjs)
+  const peers = createPeers({ file: () => path.join(dataDir, "pads-servers.json") });
+  let padsLink = null; // made once vaultFile is defined, below
+  /** A paired page may use the relay, but never to reach the desktop itself (its own server, by any name that
+   *  leads to this computer, after any redirect): that would give it the desktop's controls. */
+  const notTheDesktop = (req) => async (u) => {
+    const port = Number(u.port || (u.protocol === "https:" ? 443 : 80));
+    if (!deskPorts.has(port) && port !== req.socket.localPort) return "";
+    const own = new Set(Object.values(os.networkInterfaces()).flat().filter(Boolean).map((i) => i.address));
+    const found = await dns.promises.lookup(u.hostname.replace(/^\[|\]$/g, ""), { all: true }).catch(() => []);
+    const local = found.some(({ address }) => /^(127\.|0\.0\.0\.0$|::1$|::$|::ffff:127\.)/.test(address) || own.has(address));
+    return local ? "A paired page can use the relay, but not to reach the desktop itself." : "";
+  };
+  setTimeout(() => dataDir && theater.sweep(), 30_000).unref?.();
+  // the tool-server programs the locksmith allowed, by fingerprint (what runs, never the keys' values)
+  const stdioFile = () => path.join(dataDir, "mcp-commands.json");
+  const stdioAllowed = () => {
+    try {
+      return JSON.parse(fs.readFileSync(stdioFile(), "utf8"));
+    } catch {
+      return {};
+    }
+  };
+  const stdioPrint = (b) => createHash("sha256").update(JSON.stringify([String(b.command || ""), (b.args ?? []).map(String), String(b.cwd || ""), Object.entries(b.env ?? {}).map(([k, v]) => [k, String(v)]).sort()])).digest("hex").slice(0, 32);
+  const engine = createEngine({ dataDir: () => dataDir, getChoice: () => readConfig().browserEngine, deskPorts: () => [...deskPorts] });
+  // the shared desk (deskState.mjs): SEASIDE's state on the server, sealed, one desk every device opens
+  // the devices on the local network (lan.mjs): for Sentry's network watch and Explorer's computers
+  const lanWatch = createLan({ dataDir: () => dataDir });
+  const desk = createDeskState({ dataDir: () => dataDir, seal: (o) => residentKeys.seal(o), open: (x) => residentKeys.open(x) });
+
+  // the heart (heart.mjs): one page does the background work; with "keep them running" on, the keeper opens the
+  // desktop headless, in its own profile, while the desktop on this computer is closed
+  const heart = createHeart({
+    dataDir: () => dataDir,
+    seal: (o) => residentKeys.seal(o),
+    open: (s) => residentKeys.open(s),
+    launch: async (url) => {
+      const eng = engine.pick();
+      if (!eng) throw new Error("no Chromium-family browser on this computer (Edge, Chrome, Brave or Chromium)");
+      const { chromium } = await import("playwright-core");
+      const profile = path.join(dataDir, "heart", "profile");
+      fs.mkdirSync(profile, { recursive: true });
+      const ctx = await chromium.launchPersistentContext(profile, { executablePath: eng.path, headless: true, chromiumSandbox: true, args: ["--no-first-run", "--no-default-browser-check"] });
+      const page = ctx.pages()[0] ?? (await ctx.newPage());
+      await page.goto(url);
+      return { close: () => ctx.close() };
+    },
+  });
+  setInterval(() => dataDir && void heart.tick(), 10_000).unref?.();
+  // memory on this computer: what's in use, the browser engine sleeping when idle, regular clean-ups (see memory.mjs)
+  const memory = createMemory({ engine, readConfig, writeConfig });
+  const beats = new Map(); // character heartbeats: when each was last taken (account|character → time)
+  // Luanti: the family's servers, the public list, and the real Luanti program on this computer (see luanti.mjs)
+  const luanti = createLuanti({ readConfig, writeConfig });
+  // Luanti in the browser: the real client built for WebAssembly, served here, its connections relayed here
+  const luantiWeb = createLuantiWeb({ dataDir: () => dataDir });
+  const luantiRelay = createLuantiRelay();
+  // Ungoogled Chromium, downloaded into the data folder when asked (see ungoogled.mjs)
+  const downloads = DOWNLOADS.map((entry) => createUngoogled({ browserDir: () => path.join(dataDir, "browser"), hold: () => engine.hold(), entry }));
+  const ungoogled = downloads[0];
+  const withDevices = (o) => ({ ...o, devices: devices.places() });
   const library = () => {
     if (!lib) {
       lib = createLibrary(dataDir);
-      const builtIn = path.join(publicDir || path.join(root, "public"), "apps", "jade-link.xdc");
+      const apps = path.join(publicDir || path.join(root, "public"), "apps");
+      const builtIn = path.join(apps, "jade-link.xdc");
       if (fs.existsSync(builtIn) && !lib.list().some((p) => p.appKey === "jade-link")) {
         try {
           lib.importAny(fs.readFileSync(builtIn), "jade-link.xdc");
         } catch {
           /* the library still works without it */
         }
+      }
+      // apps that come with the desktop (public/apps/shipped.json): each added once per data folder, so one
+      // that someone removes stays removed; a newer shipped version is added next to the old
+      try {
+        const shipped = JSON.parse(fs.readFileSync(path.join(apps, "shipped.json"), "utf8"));
+        const noteFile = path.join(dataDir, "xdc", "shipped.json");
+        let done = [];
+        try {
+          done = JSON.parse(fs.readFileSync(noteFile, "utf8"));
+        } catch {
+          done = [];
+        }
+        const before = done.length;
+        for (const s of shipped) {
+          const file = path.join(apps, path.basename(String(s.file)));
+          if (done.includes(s.file) || !fs.existsSync(file)) continue;
+          try {
+            lib.importAny(fs.readFileSync(file), path.basename(file), { ...(s.source ? { source: s.source } : {}), ...(s.name ? { name: s.name } : {}) });
+            done.push(s.file);
+          } catch {
+            /* a broken file: tried again next time */
+          }
+        }
+        if (done.length !== before) fs.writeFileSync(noteFile, JSON.stringify(done, null, 1));
+      } catch {
+        /* no list, or it can't be read: nothing shipped to add */
       }
     }
     return lib;
@@ -106,12 +287,22 @@ export function deskServer() {
     return full === base || full.startsWith(base + path.sep) ? full : null;
   };
 
+  padsLink = createPadsLink({ pads, peers, vaultFile });
+  /** Where other devices can reach this server: this computer, and its home-network (and Tailscale) addresses. */
+  const addressesOf = (port) => [
+    `http://localhost:${port}`,
+    ...Object.values(os.networkInterfaces()).flat().filter((i) => i && i.family === "IPv4" && !i.internal && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.)/.test(i.address)).map((i) => `http://${i.address}:${port}`),
+  ];
+
   const hostOf = (req) => String(req.headers.host || "").replace(/:\d+$/, "").toLowerCase();
   const isAppHost = (req) => hostOf(req) === "127.0.0.1";
   const isDeskHost = (req) => hostOf(req) === "localhost" || hostOf(req).endsWith(".localhost");
   // reached through Tailscale (`tailscale serve`, or the tailnet name): one address for the desktop and its apps
   const viaTailnet = (req) => hostOf(req).endsWith(".ts.net");
   const lan = () => process.env.PDD_LAN === "1";
+  // made on this computer itself: from this machine, to the local address (not through Tailscale or the network)
+  const onThisPc = (req) =>
+    /^(127\.|::1$|::ffff:127\.)/.test(String(req.socket.remoteAddress || "")) && (isDeskHost(req) || hostOf(req) === "127.0.0.1" || hostOf(req) === "[::1]");
 
   const send = (res, code, body, type = "application/json") => {
     res.statusCode = code;
@@ -187,6 +378,120 @@ export function deskServer() {
     const parts = url.pathname.split("/").filter(Boolean).slice(1); // after "api"
     const m = req.method;
     const L = library();
+    // the module door (modules.mjs): looking in the Box and bringing modules in, from this computer or Tailscale's https
+    if (parts[0] === "modules") {
+      try {
+        if (!onThisPc(req) && !viaTailnet(req)) return send(res, 403, { error: "Modules are brought in on the desktop's own computer." });
+        const b = m === "POST" ? JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}") : {};
+        if (parts[1] === "installed" && m === "GET") return send(res, 200, modules.installed());
+        if (parts[1] === "look" && m === "POST") return send(res, 200, await modules.look((Array.isArray(b.orgs) ? b.orgs : []).map(String).slice(0, 10)));
+        if (parts[1] === "install" && m === "POST") return send(res, 200, await modules.install(String(b.org || ""), String(b.repo || ""), String(b.commit || "")));
+        return send(res, 404, { error: "Not found" });
+      } catch (e) {
+        return send(res, e.status && e.status < 600 ? e.status : 500, { error: e.message });
+      }
+    }
+    // real terminals: from this computer or Tailscale's https only; switching them on only from this computer
+    if (parts[0] === "terminal") {
+      try {
+        if (!onThisPc(req) && !viaTailnet(req)) return send(res, 403, { error: "The real terminal opens on the desktop's own computer or over your tailnet." });
+        const b = m === "POST" ? JSON.parse((await readBody(req, 20_000)).toString("utf8") || "{}") : {};
+        if (!parts[1] && m === "GET") return send(res, 200, { ...terminals.settings(), sessions: terminals.list(), workspaces: terminals.workspaces(), here: onThisPc(req) });
+        if (parts[1] === "on" && m === "POST") {
+          if (b.on && !onThisPc(req)) return send(res, 403, { error: "Switch the real terminal on from the desktop's own computer." });
+          return send(res, 200, terminals.setOn(Boolean(b.on)));
+        }
+        if (parts[1] === "open" && m === "POST") return send(res, 200, terminals.open({ workspace: b.workspace, cols: b.cols, rows: b.rows, as: b.as === "separate" ? "separate" : "you" }));
+        // which separate account shells may run as, and forgetting its pinned host key: on this computer only
+        if ((parts[1] === "separate" || parts[1] === "forget-host-key") && m === "POST") {
+          if (!onThisPc(req)) return send(res, 403, { error: "The separate account is set up on the desktop's own computer." });
+          if (parts[1] === "separate") terminals.setSeparate({ user: b.user, port: b.port });
+          else terminals.forgetHostKey();
+          return send(res, 200, terminals.settings());
+        }
+        if (parts[1] === "close" && m === "POST") return send(res, 200, { ok: terminals.close(String(b.id || "")) });
+        return send(res, 404, { error: "Not found" });
+      } catch (e) {
+        return send(res, e.status && e.status < 600 ? e.status : 500, { error: e.message });
+      }
+    }
+    // each character's files on disk, for her other bodies (bodies.mjs): only from this computer or Tailscale's https
+    if (parts[0] === "bodies") {
+      try {
+        if (!onThisPc(req) && !viaTailnet(req)) return send(res, 403, { error: "A character's folder is kept from the desktop's own computer." });
+        const id = decodeURIComponent(parts[1] || "");
+        if (m === "GET") return send(res, 200, bodies.read(id));
+        if (m === "PUT") {
+          const b = JSON.parse((await readBody(req, 200_000_000)).toString("utf8") || "{}");
+          // two ways (sync), or the old one-way mirror for anything that still asks for it
+          return send(res, 200, b.sync ? bodies.sync(id, b.files ?? {}) : bodies.write(id, b.files ?? {}));
+        }
+        return send(res, 404, { error: "Not found" });
+      } catch (e) {
+        return send(res, e.status || 500, { error: e.message });
+      }
+    }
+    // each character's own keys (residentKeys.mjs): names for any desktop page; values are seen and set only on this
+    // computer, or over Tailscale's https
+    if (parts[0] === "resident-keys") {
+      try {
+        const see = onThisPc(req) || viaTailnet(req);
+        if (!parts[1] && m === "GET") return send(res, 200, { names: residentKeys.names(), canSee: see });
+        if (!see) return send(res, 403, { error: "A character's keys are seen and set on the desktop's own computer, or over Tailscale's https." });
+        const id = decodeURIComponent(parts[1] || "");
+        if (parts[2] === "values" && m === "GET") return send(res, 200, { values: residentKeys.values(id) });
+        if (!parts[2] && m === "PUT") {
+          const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
+          return send(res, 200, { names: residentKeys.set(id, String(b.name || ""), String(b.value ?? "")) });
+        }
+        return send(res, 404, { error: "Not found" });
+      } catch (e) {
+        return send(res, e.status || 500, { error: e.message });
+      }
+    }
+    if (parts[0] === "mcp-stdio") {
+      try {
+        if (parts[1] === "rpc" && m === "POST") {
+          const msg = JSON.parse((await readBody(req, 20_000_000)).toString("utf8") || "{}");
+          const one = (x) => stdio.send(String(parts[2] || ""), x);
+          const out = Array.isArray(msg) ? (await Promise.all(msg.map(one))).filter(Boolean) : await one(msg);
+          if (out == null || (Array.isArray(out) && !out.length)) return send(res, 202, "", "text/plain");
+          return send(res, 200, out);
+        }
+        if (parts[1] === "rpc") return send(res, 405, { error: "Use POST." });
+        if (m === "GET") return send(res, 200, { running: stdio.list(), allowed: stdioAllowed() });
+        const b = JSON.parse((await readBody(req, 200_000)).toString("utf8") || "{}");
+        // what she asked to run, as she wrote it (${NAME} still in place): that's what gets allowed
+        const asked = { command: b.command, args: b.args ?? [], cwd: b.cwd ?? "", env: b.env ?? {} };
+        const print = stdioPrint(asked);
+        if (parts[1] === "allow" && m === "POST") {
+          if (!onThisPc(req)) return send(res, 403, { error: "Programs are allowed from the desktop's own computer." });
+          const all = stdioAllowed();
+          if (b.allow === false) delete all[print];
+          else all[print] = { ...asked, name: String(b.name || ""), owner: String(b.owner || ""), at: Date.now() };
+          fs.writeFileSync(stdioFile(), JSON.stringify(all, null, 2));
+          return send(res, 200, { print, allowed: b.allow !== false });
+        }
+        if (parts[1] === "start" && m === "POST") {
+          if (!stdioAllowed()[print]) return send(res, 403, { error: "This program hasn't been allowed yet.", print });
+          // the keys' values, filled in by the page from Keys, replace their ${NAME}s only now
+          const values = b.values ?? {};
+          const fill = (v) => String(v).replace(/\$\{([A-Za-z0-9_]+)\}/g, (_, n) => String(values[n] ?? process.env[n] ?? ""));
+          return send(res, 200, stdio.start({ id: String(b.id || ""), command: asked.command, args: asked.args.map(fill), cwd: asked.cwd, env: Object.fromEntries(Object.entries(asked.env).map(([k, v]) => [k, fill(v)])) }));
+        }
+        if (parts[1] === "stop" && m === "POST") return send(res, 200, { stopped: stdio.stop(String(b.id || "")) });
+        if (parts[1] === "status" && m === "POST") return send(res, 200, { ...stdio.status(String(b.id || "")), print, allowed: Boolean(stdioAllowed()[print]) });
+      } catch (e) {
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    if (parts[0] === "vecmem" && m === "POST") {
+      try {
+        return send(res, 200, vecmem.run(JSON.parse((await readBody(req, 50_000_000)).toString("utf8") || "{}")));
+      } catch (e) {
+        return send(res, 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
     if (parts[0] === "oauth" && parts[1] === "aicord") {
       if (parts[2] === "start" && m === "POST") {
         const b = JSON.parse((await readBody(req, 20_000)).toString("utf8") || "{}");
@@ -221,6 +526,25 @@ export function deskServer() {
         }
       } catch (e) {
         return send(res, 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    // voice samples: a short WAV per character, in the vault under .pandora/voices/<character>/
+    if (parts[0] === "voice-sample") {
+      const char = String(url.searchParams.get("char") || "").replace(/[^\w.-]+/g, "_").slice(0, 80);
+      if (!char) return send(res, 400, { error: "Which character?" });
+      const dir = path.join(vaultDir(), ".pandora", "voices", char);
+      if (m === "POST") {
+        const bytes = await readBody(req, 30_000_000);
+        if (bytes.subarray(0, 4).toString("latin1") !== "RIFF" || bytes.subarray(8, 12).toString("latin1") !== "WAVE") return send(res, 400, { error: "Send the sample as a WAV." });
+        fs.mkdirSync(dir, { recursive: true });
+        const name = `${Date.now().toString(36)}.wav`;
+        fs.writeFileSync(path.join(dir, name), bytes);
+        return send(res, 200, { entry: [".pandora", "voices", char, name].join("/") });
+      }
+      if (m === "DELETE") {
+        const name = path.basename(String(url.searchParams.get("entry") || ""));
+        if (/^[\w.-]+\.wav$/.test(name)) fs.rmSync(path.join(dir, name), { force: true });
+        return send(res, 200, { ok: true });
       }
     }
     if (parts[0] === "avatar") {
@@ -264,8 +588,7 @@ export function deskServer() {
             const bytes = await V.attachment(token, b.attachment ?? {});
             const name = /\.xdc$/i.test(String(b.attachment?.name || "")) ? String(b.attachment.name) : `${String(b.attachment?.name || "app").replace(/\.[^.]*$/, "")}.xdc`;
             const r = library().importAny(bytes, name);
-            const pkg = r.added[0] ?? library().list().find((p) => r.duplicates && p.name && name.toLowerCase().includes(String(p.name).toLowerCase().slice(0, 8)));
-            return send(res, 200, { ok: true, added: r.added.length, duplicates: r.duplicates, id: pkg?.id ?? null, errors: r.errors });
+            return send(res, 200, { ok: true, added: r.added.length, duplicates: r.duplicates, id: r.found[0]?.id ?? null, errors: r.errors });
           }
         }
       } catch (e) {
@@ -279,6 +602,14 @@ export function deskServer() {
         if (parts[1] === "status" && m === "GET") return send(res, 200, H.status());
         if (parts[1] === "events" && m === "GET") return void H.connect(req, res);
         if (parts[1] === "asset" && m === "GET") return serveRange(req, res, H.assetPath(url.searchParams.get("p")));
+        // a Mini App from Vector's own folders, into Games & Apps (the same file is found again, a new version added)
+        if (parts[1] === "import-xdc" && m === "POST") {
+          const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
+          const file = H.assetPath(b.path);
+          if (!file || !fs.existsSync(file)) return send(res, 404, { error: "That Mini App isn't in Vector's folders." });
+          const r = library().importAny(fs.readFileSync(file), path.basename(file));
+          return send(res, 200, { id: r.found[0]?.id ?? null, added: r.added.length, errors: r.errors });
+        }
         if (parts[1] === "upload" && m === "POST") return send(res, 200, { path: H.upload(decodeURIComponent(String(req.headers["x-filename"] || "file")), await readBody(req, 500_000_000)) });
         if (m === "POST") {
           const b = JSON.parse((await readBody(req, 300_000_000)).toString("utf8") || "{}");
@@ -300,6 +631,283 @@ export function deskServer() {
         return send(res, e?.status || 400, { error: e instanceof Error ? e.message : String(e) });
       }
     }
+    // the full browser: its state, its live stream, and everything the Browser window asks of it
+    if (parts[0] === "engine") {
+      deskPorts.add(req.socket.localPort);
+      try {
+        if (parts[1] === "status" && m === "GET")
+          return send(res, 200, { ...engine.status(), ungoogled: ungoogled.status(), downloads: downloads.map((d) => d.status()), downloaded: engine.downloaded(), canChange: onThisPc(req) });
+        // which engine, and fetching Ungoogled Chromium: only from the computer itself
+        if ((parts[1] === "choose" || parts[1] === "ungoogled" || parts[1] === "download") && m === "POST") {
+          if (!onThisPc(req)) return send(res, 403, { error: "The browser's engine can only be changed on the desktop's own computer." });
+          const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
+          if (parts[1] === "choose") {
+            // "" = automatic; else a browser found on this computer, a downloaded engine, or a program the person
+            // picked themselves (b.custom: any Chromium-family browser's program file)
+            const p = String(b.path || "");
+            const found = [...engine.installedEngines(), ...engine.downloaded()].find((e) => e.path === p);
+            const custom = !found && b.custom && p && fs.existsSync(p) && fs.statSync(p).isFile() ? { name: String(b.name || path.basename(p).replace(/\.(exe|app)$/i, "")).slice(0, 60), path: path.resolve(p) } : null;
+            if (p && !found && !custom) return send(res, 400, { error: b.custom ? "There's no program at that path." : "That isn't one of the browsers found on this computer." });
+            const pickedEngine = found ?? custom;
+            writeConfig({ browserEngine: pickedEngine ? { name: pickedEngine.name, path: pickedEngine.path } : null });
+            engine.forgetLast();
+            const reopen = await engine.restart();
+            return send(res, 200, { ...engine.status(), reopen });
+          }
+          const d = parts[1] === "ungoogled" ? ungoogled : downloads.find((x) => x.id === String(b.id || ""));
+          if (!d) return send(res, 404, { error: "There's no such download." });
+          if (b.op === "check") return send(res, 200, { ...d.status(), latest: await d.latest() });
+          if (b.op === "install") {
+            // this one is used next (chosen, so a newer download of another doesn't take over)
+            writeConfig({ browserEngine: { name: d.name, path: d.program() } });
+            engine.forgetLast();
+            return send(res, 200, d.install());
+          }
+          if (b.op === "remove") {
+            if (readConfig().browserEngine?.path === d.program()) writeConfig({ browserEngine: null });
+            return send(res, 200, await d.remove());
+          }
+        }
+        if (parts[1] === "stream" && m === "GET") return engine.stream(res, url.searchParams.get("frames") !== "0");
+        if (!parts[1] && m === "POST") return send(res, 200, await engine.cmd(JSON.parse((await readBody(req, 200_000)).toString("utf8") || "{}")));
+      } catch (e) {
+        return send(res, e?.status || 400, { error: e instanceof Error ? e.message.split("\n")[0] : String(e) });
+      }
+    }
+    // accounts that travel: who travels, one account's desktop, keep it, stop keeping it
+    if (parts[0] === "travel") {
+      try {
+        const name = String(url.searchParams.get("name") || "");
+        if (m === "GET" && !parts[1]) return send(res, 200, travel.list());
+        if (parts[1] === "state" && m === "GET") return send(res, 200, travel.get(name));
+        if (parts[1] === "state" && m === "POST") return send(res, 200, travel.put(name, JSON.parse((await readBody(req, 80_000_000)).toString("utf8") || "{}")));
+        if (parts[1] === "stop" && m === "POST") return send(res, 200, travel.stop(name));
+      } catch (e) {
+        return send(res, e?.status || 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    // a device sharing its own files: its page opens a share, waits for requests, and answers them
+    if (parts[0] === "devshare") {
+      try {
+        const id = url.searchParams.get("id"), token = url.searchParams.get("token");
+        if (parts[1] === "next" && m === "GET") return devices.next(id, token, res);
+        if (parts[1] === "reply" && m === "POST") return send(res, 200, { ok: await devices.reply(id, token, url.searchParams.get("rid"), req) });
+        // a device sharing its music library: the list of songs Music shows the other devices (files stay there).
+        // Before the general POST below, which reads the body (a body can only be read once).
+        if (parts[1] === "music" && m === "POST") {
+          const b = JSON.parse((await readBody(req, 20_000_000)).toString("utf8") || "{}");
+          return send(res, 200, devices.setMusic(id, token, b.tracks));
+        }
+        if (m === "POST") {
+          const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
+          if (parts[1] === "open") return send(res, 200, devices.open(b));
+          if (parts[1] === "close") return send(res, 200, (devices.close(b.id, b.token), { ok: true }));
+        }
+      } catch (e) {
+        return send(res, e?.status || 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    // Explorer: the desktop's places, and the computer when that's allowed (see files.mjs)
+    // pairings for Classic opened elsewhere: listed here; made and removed only on the desktop's own computer
+    if (parts[0] === "pads") {
+      try {
+        if (parts[1] === "roster" && m === "GET") return send(res, 200, await padsLink.roster(String(url.searchParams.get("account") || "")));
+        // linked servers: this one's name, the others, and (on this computer only) linking, unlinking, renaming
+        if (parts[1] === "servers") {
+          if (m === "GET") return send(res, 200, { me: peers.me(), servers: peers.list(), canChange: onThisPc(req), addresses: addressesOf(req.socket.localPort), lan: lan() });
+          if (!onThisPc(req)) return send(res, 403, { error: "Servers are linked and unlinked on each server's own computer." });
+          const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
+          if (b.op === "invite") return send(res, 200, peers.invite());
+          if (b.op === "link") return send(res, 200, await padsLink.link(String(b.address || ""), String(b.code || ""), { port: req.socket.localPort, url: String(b.url || "") }));
+          if (b.op === "unlink") return send(res, 200, peers.remove(String(b.id || "")));
+          if (b.op === "rename") return send(res, 200, peers.rename(String(b.name || "")));
+          return send(res, 400, { error: "Which change?" });
+        }
+        if (m === "POST") {
+          const b = JSON.parse((await readBody(req, 200_000)).toString("utf8") || "{}");
+          // the roster that comes back includes linked servers' devices, as last known (it doesn't wait for them)
+          if (parts[1] === "hello") {
+            const here = pads.hello(b);
+            return send(res, 200, { ...here, ...(await padsLink.roster(String(b.account || ""), { wait: false })) });
+          }
+          if (parts[1] === "arrange") return send(res, 200, pads.arrange(String(b.account || ""), b.positions));
+          if (parts[1] === "forget") return send(res, 200, pads.forget(String(b.account || ""), String(b.id || "")));
+          if (parts[1] === "send") return send(res, 200, await padsLink.send(String(b.account || ""), b));
+        }
+      } catch (e) {
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    if (parts[0] === "pairs") {
+      if (m === "GET") {
+        // where a paired Classic can find the desktop: this computer, and its home-network addresses (those answer
+        // only when the desktop is shared on the network)
+        const port = req.socket.localPort;
+        const lanIps = Object.values(os.networkInterfaces()).flat().filter((i) => i && i.family === "IPv4" && !i.internal && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.)/.test(i.address)).map((i) => `http://${i.address}:${port}`);
+        return send(res, 200, { pairs: pairs.list(), canChange: onThisPc(req), addresses: [`http://localhost:${port}`, ...lanIps], lan: lan() });
+      }
+      if (m === "POST") {
+        if (!onThisPc(req)) return send(res, 403, { error: "Pairings are made and removed on the desktop's own computer." });
+        const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
+        if (b.op === "add") return send(res, 200, pairs.add(b.name));
+        if (b.op === "remove") return send(res, 200, pairs.remove(b.id));
+      }
+    }
+    if (parts[0] === "theater") {
+      const p = Object.fromEntries(url.searchParams.entries());
+      try {
+        if (parts[1] === "list" && m === "GET") return send(res, 200, { ...theater.list(Boolean(p.fresh)), canAddFolders: onThisPc(req) });
+        // a device's shared folder, as videos (its page lists each folder; up to three folders down)
+        if (parts[1] === "device" && m === "GET") {
+          const out = [];
+          const walk = async (dir, depth) => {
+            for (const e of (await devices.list(dir)).entries) {
+              if (out.length >= 2000) return;
+              if (e.dir) {
+                if (depth < 3) await walk(e.path, depth + 1);
+              } else if (VIDEO_EXT.has(e.ext))
+                out.push({ id: `d${e.size.toString(36)}-${Math.round(e.mtime / 1000).toString(36)}`, path: e.path, name: e.name.replace(/\.[^.]+$/, ""), ext: e.ext, shelf: "", size: e.size, mtime: e.mtime, seconds: 0, thumb: 0, fav: false, device: true });
+            }
+          };
+          await walk(String(p.path || ""), 0);
+          return send(res, 200, { videos: out.sort((a, b) => b.mtime - a.mtime) });
+        }
+        // a folder watched where it is (a network share, a folder on this computer): added on the computer itself
+        if (parts[1] === "folder" && m === "POST") {
+          if (!onThisPc(req)) return send(res, 403, { error: "Folders are added to the Theater on the desktop's own computer." });
+          const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
+          return send(res, 200, b.drop ? theater.dropFolder(b.path) : theater.addFolder(files().allowed(b.path, true), b.name));
+        }
+        if (parts[1] === "thumb" && m === "GET") {
+          const f = theater.thumbFile(p.id);
+          if (!fs.existsSync(f)) return send(res, 404, "No thumbnail yet", "text/plain");
+          res.setHeader("Content-Type", "image/jpeg");
+          res.setHeader("Cache-Control", "max-age=31536000, immutable");
+          return fs.createReadStream(f).pipe(res);
+        }
+        if (parts[1] === "thumb" && m === "POST") return send(res, 200, (theater.setThumb(p.id, await readBody(req, 2_000_000), p.seconds), { ok: true }));
+        if (parts[1] === "upload") {
+          if (m === "GET") return send(res, 200, theater.uploadState(p));
+          if (m === "DELETE") return send(res, 200, (theater.dropUpload(p), { ok: true }));
+          if (m === "POST") return send(res, 200, theater.uploadPiece({ ...p, sha256: req.headers["x-sha256"] }, await readBody(req, PIECE_MAX)));
+        }
+        if (m === "POST") {
+          const b = JSON.parse((await readBody(req, 2_000_000)).toString("utf8") || "{}");
+          if (parts[1] === "have") return send(res, 200, { have: theater.have(b.items) });
+          if (parts[1] === "shelf") return send(res, 200, { shelf: theater.mkShelf(b.name, b.device) });
+          // a shelf, or a show inside one, added to another shelf (moved there); a shelf renamed
+          if (parts[1] === "add-to-shelf") return send(res, 200, theater.addToShelf(String(b.shelf ?? ""), String(b.folder ?? ""), String(b.to ?? "")));
+          if (parts[1] === "rename-shelf") return send(res, 200, theater.renameShelf(String(b.shelf ?? ""), b.name));
+          if (parts[1] === "rename-folder") return send(res, 200, theater.renameFolder(String(b.shelf ?? ""), String(b.folder ?? ""), b.name));
+          if (parts[1] === "fav") return send(res, 200, theater.setFav(b.id, Boolean(b.on)));
+          if (parts[1] === "playlist") return send(res, 200, b.drop ? theater.dropPlaylist(String(b.id || "")) : theater.savePlaylist(b));
+          if (parts[1] === "collection") return send(res, 200, b.drop ? theater.dropCollection(String(b.id || "")) : theater.saveCollection(b));
+          if (parts[1] === "move") return send(res, 200, { path: theater.moveTo(b.path, b.shelf) });
+        }
+      } catch (e) {
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    // folders linked for the characters to read (library/<name>/… in their files); see library.mjs
+    if (parts[0] === "library") {
+      const who = String(url.searchParams.get("who") || "");
+      const local = onThisPc(req);
+      try {
+        // the fserve: a big file's link (a ticket for that one file, good for a day), for whoever was given it
+        if (m === "GET" && parts[1] === "get" && parts[2]) {
+          const t = linked.redeem(decodeURIComponent(parts[2]));
+          if (!t) return send(res, 410, "That link has run out. Ask for the file again.", "text/plain");
+          res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(t.name)}`);
+          return serveRange(req, res, t.full);
+        }
+        if (m === "GET") {
+          if (parts[1] === "links") return send(res, 200, { links: linked.links().map((l) => ({ name: l.name, for: l.for, serve: Boolean(l.serve), ...(local ? { path: l.path } : {}) })), canChange: local });
+          // what a character hands out: her shelves, a search, all of it
+          if (parts[1] === "shelves") return send(res, 200, { shelves: linked.shelves(who), count: linked.catalog(who).length });
+          if (parts[1] === "find") return send(res, 200, { files: linked.find(who, url.searchParams.get("q")) });
+          if (parts[1] === "catalog") return send(res, 200, { files: linked.catalog(who, Boolean(url.searchParams.get("fresh"))) });
+          // one file handed out: its bytes (to attach), only to the page on this computer that runs the bridges
+          if (parts[1] === "bytes") {
+            if (!local) return send(res, 403, { error: "Files are handed out from the desktop's own computer." });
+            const f = linked.pick(who, url.searchParams.get("which"));
+            if (f.size > 25 * 1048576) return send(res, 413, { error: "That one is too big to attach; it goes as a link." });
+            return serveRange(req, res, f.full);
+          }
+          if (parts[1] === "list") return send(res, 200, { entries: linked.list(who, url.searchParams.get("path")) });
+          if (parts[1] === "read") return send(res, 200, { text: linked.readFile(who, url.searchParams.get("path")) });
+          if (parts[1] === "search") return send(res, 200, { hits: linked.search(who, url.searchParams.get("q"), url.searchParams.get("within") || "") });
+        }
+        if (m === "POST") {
+          if (!local) return send(res, 403, { error: "Folders are linked for the characters on the desktop's own computer." });
+          const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
+          if (parts[1] === "link") return send(res, 200, linked.link({ path: files().allowed(b.path, local), name: b.name, for: b.for }));
+          if (parts[1] === "unlink") return send(res, 200, linked.unlink(b.path));
+          if (parts[1] === "serve") return send(res, 200, linked.setServe(b.path, b.on));
+          // a file about to be handed out: which it is, its SHA-256, and (for a big one) a link's ticket
+          if (parts[1] === "fetch") {
+            const f = linked.pick(String(b.who || ""), b.which);
+            const { full: _full, ...file } = f;
+            return send(res, 200, { file, sha256: await linked.sha256(f), ticket: b.link ? linked.ticket(f) : undefined });
+          }
+        }
+      } catch (e) {
+        return send(res, e?.status || (e?.code === "ENOENT" ? 404 : 400), { error: e?.code === "ENOENT" ? "That isn't there (is the network place reachable?)." : e instanceof Error ? e.message : String(e) });
+      }
+    }
+    if (parts[0] === "files") {
+      const F = files();
+      const local = onThisPc(req);
+      try {
+        const asked = url.searchParams.get("path");
+        if (m === "GET" && isDevicePath(asked)) {
+          // shared by another device: listed and sent by that device's page
+          if (parts[1] === "list") return send(res, 200, await devices.list(asked));
+          if (parts[1] === "raw") return devices.raw(asked, res, Boolean(url.searchParams.get("download")), req.headers.range);
+          if (parts[1] === "stat") {
+            const up = asked.includes("/") ? asked.slice(0, asked.lastIndexOf("/")) : asked;
+            if (up === asked) return send(res, 200, { path: asked, name: asked, dir: true, size: 0, mtime: 0, ctime: 0, ext: "" });
+            const hit = (await devices.list(up)).entries.find((e) => e.path === asked);
+            if (!hit) return send(res, 404, { error: "That isn't there any more." });
+            return send(res, 200, { ...hit, ctime: hit.mtime });
+          }
+        }
+        if (m === "POST" && isDevicePath(asked)) return send(res, 403, { error: "Files shared from another device can be opened and downloaded here, not changed." });
+        if (m === "GET") {
+          if (parts[1] === "places") return send(res, 200, { ...F.overview(local), network: await F.network(local), devices: devices.places() });
+          if (parts[1] === "list") return send(res, 200, await F.listAny(url.searchParams.get("path"), local));
+          if (parts[1] === "stat") return send(res, 200, F.stat(url.searchParams.get("path"), local));
+          if (parts[1] === "trash") return send(res, 200, F.trashList());
+          if (parts[1] === "raw") {
+            const file = F.allowed(url.searchParams.get("path"), local);
+            // "download": saved on the device asking, under its own name
+            if (url.searchParams.get("download")) res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(file))}`);
+            return serveRange(req, res, file);
+          }
+        }
+        if (m === "POST" && parts[1] === "upload")
+          return send(res, 200, { path: F.upload(url.searchParams.get("dir"), decodeURIComponent(String(req.headers["x-filename"] || "file")), await readBody(req, 4_000_000_000), local) });
+        if (m === "POST") {
+          const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
+          if ([b.path, b.into].some(isDevicePath)) return send(res, 403, { error: "Files shared from another device can be opened and downloaded here, not changed." });
+          if (parts[1] === "mkdir") return send(res, 200, { path: F.mkdir(b.path, b.name, local) });
+          if (parts[1] === "unzip") return send(res, 200, F.unzip(b.path, local));
+          if (parts[1] === "move") return send(res, 200, { path: F.move(b.path, { name: b.name, into: b.into }, local) });
+          if (parts[1] === "trash") return send(res, 200, F.trash(b.path, local));
+          if (parts[1] === "restore") return send(res, 200, { path: F.restore(String(b.id), local) });
+          if (parts[1] === "reveal-device") return send(res, 200, (F.revealOnDevice(b.path, local), { ok: true }));
+          if (parts[1] === "whole-pc") return send(res, 200, { ...F.setWhole(b.on, local), devices: devices.places() });
+          if (parts[1] === "share") return send(res, 200, withDevices(F.share({ path: b.path, on: Boolean(b.on), wholePc: typeof b.wholePc === "boolean" ? b.wholePc : undefined }, local)));
+          // a Mini App (.xdc) from anywhere Explorer reaches, into Games & Apps
+          if (parts[1] === "import-xdc") {
+            const file = F.allowed(b.path, local);
+            const r = library().importAny(fs.readFileSync(file), path.basename(file));
+            return send(res, 200, { added: r.added.length, duplicates: r.duplicates, id: r.found[0]?.id ?? null, errors: r.errors });
+          }
+        }
+      } catch (e) {
+        return send(res, e?.status || (e?.code === "ENOENT" ? 404 : 400), { error: e?.code === "ENOENT" ? "That isn't there any more." : e instanceof Error ? e.message : String(e) });
+      }
+    }
     // the Mac that last ran the setup (curl …/mac | bash), for filling in engine addresses
     if (parts[0] === "mac" && m === "GET") {
       try {
@@ -312,7 +920,7 @@ export function deskServer() {
     if (parts[0] === "browse" && parts[1] === "key" && m === "GET") return send(res, 200, { key: browser.key });
     if (parts[0] === "folders" && m === "GET") {
       try {
-        return send(res, 200, await listFolders(url.searchParams.get("path") || ""));
+        return send(res, 200, await listFolders(url.searchParams.get("path") || "", path.join(dataDir, "network-places.json"), { newPlaces: onThisPc(req) }));
       } catch (e) {
         return send(res, 400, { error: e instanceof Error ? e.message.replace(/^\w+: /, "") : String(e) });
       }
@@ -320,9 +928,14 @@ export function deskServer() {
     if (parts[0] === "music") {
       const M = music();
       if (parts[1] === "library" && m === "GET") return send(res, 200, M.list());
+      // the libraries other devices are sharing right now (their files stay on them; played through /api/files/raw)
+      if (parts[1] === "shared" && m === "GET") return send(res, 200, { libraries: devices.libraries() });
       if (parts[1] === "scan" && m === "POST") {
         const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
-        return send(res, 200, await M.scan(Array.isArray(b.folders) ? b.folders.map(String) : M.folders()));
+        const folders = Array.isArray(b.folders) ? b.folders.map(String) : M.folders();
+        // a network place new to this computer is reached from the computer itself first (see listFolders)
+        if (!onThisPc(req)) for (const f of folders) if (!(await knownPlace(f, path.join(dataDir, "network-places.json")))) return send(res, 403, { error: `${f} is a network place this computer hasn't opened yet: open it on the desktop's own computer first.` });
+        return send(res, 200, await M.scan(folders));
       }
       if (parts[1] === "file") return M.serve(req, res, String(url.searchParams.get("id") || ""));
       if (parts[1] === "cover") return void (await M.cover(res, String(url.searchParams.get("id") || "")));
@@ -331,6 +944,14 @@ export function deskServer() {
         return i ? send(res, 200, i) : send(res, 404, { error: "That song isn't in the library." });
       }
       if (parts[1] === "radio") return void (await M.radio(req, res, String(url.searchParams.get("url") || "")));
+      if (parts[1] === "rename" && m === "POST") {
+        try {
+          const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
+          return send(res, 200, M.rename(String(b.id || ""), b.name, { local: onThisPc(req) }));
+        } catch (e) {
+          return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+        }
+      }
       if (parts[1] === "upload" && m === "POST") {
         try {
           const name = M.upload(decodeURIComponent(String(req.headers["x-filename"] || "track")), await readBody(req, 500_000_000));
@@ -342,11 +963,119 @@ export function deskServer() {
     }
     if (parts[0] === "relay" && m === "POST") return relay(req, res, JSON.parse((await readBody(req, 60_000_000)).toString("utf8") || "{}"));
     if (parts[0] === "info") return send(res, 200, { dataDir, xdcDir: L.root, fromEnv: Boolean(process.env.PDD_DATA) });
+    if (parts[0] === "luanti") {
+      try {
+        if (parts[1] === "public" && m === "GET") return send(res, 200, { servers: await luanti.publicList() });
+        // the in-browser client: whether it's here, and the newest build (asked only when wanted)
+        if (parts[1] === "web" && m === "GET") return send(res, 200, { ...luantiWeb.status(), latest: url.searchParams.get("check") ? await luantiWeb.latest().catch(() => null) : undefined, canInstall: onThisPc(req) });
+        if (parts[1] === "web" && m === "POST") {
+          if (!onThisPc(req)) return send(res, 403, { error: "It's set up on the desktop's own computer." });
+          return send(res, 200, await luantiWeb.install());
+        }
+        if (!parts[1] && m === "GET") return send(res, 200, { ...luanti.status(), canLaunch: onThisPc(req) });
+        if (!parts[1] && m === "POST") {
+          const b = JSON.parse((await readBody(req, 20_000)).toString("utf8") || "{}");
+          // the server list is the family's (any device); the program, and starting it, belong to this computer
+          if (b.op === "save-server") return send(res, 200, luanti.saveServer(b));
+          if (b.op === "remove-server") return send(res, 200, luanti.removeServer(String(b.id || "")));
+          if (!onThisPc(req)) return send(res, 403, { error: "Luanti is started on the desktop's own computer. On this device, use the Luanti app with the server's address." });
+          if (b.op === "set-program") return send(res, 200, luanti.setProgram(String(b.path || "")));
+          if (b.op === "launch") return send(res, 200, luanti.launch(b));
+          return send(res, 400, { error: "Which change?" });
+        }
+      } catch (e) {
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    // the shared desk: the desktop's own pages and devices over Tailscale's https or the LAN (as the desktop itself is);
+    // the first copy is made from the desktop's own computer
+    // the local network's devices: seen and looked for only on this computer (a map of the household isn't for every page)
+    if (parts[0] === "lan") {
+      try {
+        if (!onThisPc(req)) return send(res, 403, { error: "The network watch is on the desktop's own computer." });
+        if (m === "GET" && !parts[1]) return send(res, 200, lanWatch.list());
+        if (m === "POST" && parts[1] === "scan") return send(res, 200, await lanWatch.scan());
+        if (m === "POST" && parts[1] === "label") {
+          const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
+          return send(res, 200, lanWatch.label(String(b.mac || ""), b.label));
+        }
+        return send(res, 404, { error: "Not found" });
+      } catch (e) {
+        return send(res, e.status || 500, { error: e.message });
+      }
+    }
+    if (parts[0] === "desk") {
+      try {
+        if (m === "GET" && !parts[1]) return send(res, 200, { ...desk.get(Number(url.searchParams.get("since")) || 0), here: onThisPc(req) });
+        // one section as it is now (a device going into a room)
+        if (m === "GET" && parts[1] === "section") {
+          const s = desk.get(0).sections[String(url.searchParams.get("name") || "")];
+          return send(res, 200, { rev: s?.rev ?? 0, value: s?.value ?? null });
+        }
+        if (m === "GET" && parts[1] === "legacy") return send(res, 200, parts[2] ? JSON.parse(desk.legacyRead(decodeURIComponent(parts[2]))) : { kept: desk.legacyList() });
+        if (m === "POST") {
+          const b = JSON.parse((await readBody(req, 200_000_000)).toString("utf8") || "{}");
+          if (parts[1] === "save") return send(res, 200, desk.put(b, { mayFound: onThisPc(req) }));
+          if (parts[1] === "legacy") return send(res, 200, desk.keepLegacy(String(b.device || ""), String(b.blob || "")));
+        }
+        return send(res, 404, { error: "Not found" });
+      } catch (e) {
+        return send(res, e.status && e.status < 600 ? e.status : 500, { error: e.message });
+      }
+    }
+    // the heart (heart.mjs): which page does the background work, and the keeper's copy of the desktop
+    if (parts[0] === "heart") {
+      try {
+        const here = onThisPc(req);
+        if (parts[1] === "beat" && m === "POST") {
+          const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
+          return send(res, 200, heart.beat(String(b.page || ""), { onPc: here, keeper: Boolean(b.keeper), port: req.socket.localPort }));
+        }
+        if (parts[1] === "leave" && m === "POST") {
+          const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
+          heart.leave(String(b.page || ""));
+          return send(res, 200, { ok: true });
+        }
+        if (parts[1] === "config" && m === "GET") return send(res, 200, { ...heart.status(), canChange: here });
+        if (!here) return send(res, 403, { error: "Keeping them running is set up on the desktop's own computer." });
+        if (parts[1] === "config" && m === "POST") return send(res, 200, heart.setConfig(JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}")));
+        if (parts[1] === "state" && m === "GET") return send(res, 200, await heart.get({ forKeeper: url.searchParams.get("keeper") === "1", since: Number(url.searchParams.get("since")) || 0 }));
+        // PUT from the page, POST from sendBeacon as the page closes
+        if (parts[1] === "state" && (m === "PUT" || m === "POST")) {
+          const b = JSON.parse((await readBody(req, 200_000_000)).toString("utf8") || "{}");
+          return send(res, 200, heart.put(String(b.page || ""), String(b.blob ?? ""), Boolean(b.final)));
+        }
+        return send(res, 404, { error: "Not found" });
+      } catch (e) {
+        return send(res, e.status || 500, { error: e.message });
+      }
+    }
+    // heartbeats: each character's beat goes to the first device that asks for it (several can be open at once)
+    if (parts[0] === "heartbeat" && parts[1] === "claim" && m === "POST") {
+      const b = JSON.parse((await readBody(req, 4000)).toString("utf8") || "{}");
+      const key = `${String(b.account || "").toLowerCase()}|${String(b.id || "")}`;
+      const every = Math.max(60_000, Number(b.every) || 30 * 60_000);
+      const was = beats.get(key) ?? 0;
+      if (Date.now() - was < every - 30_000) return send(res, 200, { ok: false });
+      beats.set(key, Date.now());
+      return send(res, 200, { ok: true });
+    }
+    if (parts[0] === "memory") {
+      if (m === "GET") return send(res, 200, { ...memory.status(), canChange: onThisPc(req) });
+      if (m === "POST") {
+        const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
+        // cleaning up is harmless from any device; changing what the computer does on its own is for the computer itself
+        if (b.op === "clean") return send(res, 200, { freed: memory.clean(), ...memory.status() });
+        if (!onThisPc(req)) return send(res, 403, { error: "These are set on the desktop's own computer." });
+        if (b.op === "sleep-engine") return send(res, 200, { slept: await memory.sleepEngine(), ...memory.status() });
+        if (b.op === "set") return send(res, 200, memory.set(b));
+      }
+    }
     if (parts[0] === "storage" && m === "POST") {
       // Move (or just point) the library to another folder, e.g. a roomier drive.
       const body = JSON.parse((await readBody(req)).toString("utf8") || "{}");
       const target = path.resolve(String(body.dataDir || ""));
-      if (!body.dataDir || !path.isAbsolute(String(body.dataDir))) return send(res, 400, { error: "Give a full folder path, like F:\pandora-data." });
+      if (!body.dataDir || !path.isAbsolute(String(body.dataDir))) return send(res, 400, { error: "Give a full folder path, like D:\\PandoraData or /home/me/pandora-data." });
       if (target === dataDir) return send(res, 200, { dataDir });
       try {
         fs.mkdirSync(target, { recursive: true });
@@ -362,7 +1091,7 @@ export function deskServer() {
       const old = dataDir;
       dataDir = target;
       lib = undefined;
-      fs.writeFileSync(path.join(root, "pdd.config.json"), JSON.stringify({ dataDir }, null, 2));
+      writeConfig({ dataDir });
       return send(res, 200, { dataDir, previous: old, moved: Boolean(body.move) });
     }
     if (parts[0] === "xdc") {
@@ -534,7 +1263,7 @@ export function deskServer() {
       const pkg = L.get(id);
       if (!pkg) return send(res, 404, "Not found", "text/plain");
       res.setHeader("Content-Security-Policy", XDC_CSP);
-      if (rel === "webxdc.js") return send(res, 200, "/* webxdc is provided by Pandora Dee Desktop */", MIME.js);
+      if (rel === "webxdc.js") return send(res, 200, "/* webxdc is provided by PDA SEASIDE */", MIME.js);
       const q = url.searchParams;
       const inject = rel.endsWith(".html") || rel.endsWith(".htm")
         ? webxdcScript({ scope: q.get("scope") || pkg.appKey, addr: q.get("addr") || "you", name: q.get("name") || "You", lan: lan() })
@@ -567,6 +1296,36 @@ export function deskServer() {
     }
   }
 
+  /** The full browser's pictures as binary (wsframes.mjs): the desktop's own page only, as with /api. Other
+   *  upgrades (Vite's own live reload) are left alone. */
+  function pictureSocket(req, socket) {
+    const where = new URL(req.url || "/", "http://x").pathname;
+    // Luanti in the browser: its game traffic, name lookups and web fetches, relayed (luantiRelay.mjs)
+    if (where === "/api/luanti/relay") {
+      if (fromElsewhere(req)) return void socket.destroy();
+      const conn = openDuplex(req, socket);
+      return void (conn ? luantiRelay.attach(conn) : socket.destroy());
+    }
+    // PADS's live wire: the desktop's own page only, as with /api
+    if (where === "/api/pads/ws") {
+      if (fromElsewhere(req)) return void socket.destroy();
+      const q = new URL(req.url || "/", "http://x").searchParams;
+      const conn = openDuplex(req, socket);
+      return void (conn ? padsWire.attach(conn, { account: q.get("account") || "", device: q.get("device") || "" }) : socket.destroy());
+    }
+    // a real terminal's window: same rules as its routes
+    if (where === "/api/terminal/ws") {
+      if (fromElsewhere(req) || (!onThisPc(req) && !viaTailnet(req))) return void socket.destroy();
+      const conn = openDuplex(req, socket);
+      return void (conn ? terminals.attach(new URL(req.url || "/", "http://x").searchParams.get("id") || "", conn) : socket.destroy());
+    }
+    if (where !== "/api/engine/ws") return;
+    if (fromElsewhere(req)) return void socket.destroy();
+    deskPorts.add(socket.localPort);
+    if (acceptSocket(req, socket)) engine.attachSocket(socket);
+    else socket.destroy();
+  }
+
   async function handle(req, res, next) {
     const url = new URL(req.url || "/", "http://x");
     try {
@@ -594,10 +1353,28 @@ export function deskServer() {
       if (url.pathname === "/hello") {
         const ua = String(req.headers["user-agent"] || "").replace(/</g, "&lt;");
         const from = String(req.socket.remoteAddress || "").replace(/^::ffff:/, "");
-        return send(res, 200, `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><body style="font:17px system-ui;padding:24px;background:#0b0912;color:#eee"><h2>This device reaches Pandora Dee Desktop.</h2><p>If the desktop itself doesn't open here, it's the browser: update it, or try another.</p><p style="opacity:.7;font-size:14px">From ${from}<br>${ua}</p><p><a style="color:#b48cff" href="/">Open the desktop</a></p></body>`, "text/html; charset=utf-8");
+        return send(res, 200, `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><body style="font:17px system-ui;padding:24px;background:#0b0912;color:#eee"><h2>This device reaches PDA SEASIDE.</h2><p>If the desktop itself doesn't open here, it's the browser: update it, or try another.</p><p style="opacity:.7;font-size:14px">From ${from}<br>${ua}</p><p><a style="color:#b48cff" href="/">Open the desktop</a></p></body>`, "text/html; charset=utf-8");
       }
       // the hidden Vector host's bridge (this computer only, with its run's token; see vectorHost.mjs)
       if (url.pathname === "/vh-bridge/next" || url.pathname === "/vh-bridge/reply") return void (await vectorHost().bridge(req, res, url, readBody));
+      // linked SEASIDE servers asking this one (with their token; joining with an invite code made here)
+      // Luanti in the browser: SEASIDE's play page and the build's own files, cross-origin isolated
+      if (url.pathname.startsWith("/luanti-web/")) return void luantiWeb.serve(req, res, url, send);
+      if (url.pathname.startsWith("/pads-peer/")) {
+        deskPorts.add(req.socket.localPort);
+        if (await padsLink.handle(req, res, url, { readBody, send })) return;
+      }
+      // paired Classic pages (other origins, with their pairing token): hello, and the relay
+      if (url.pathname === "/paired/hello" || url.pathname === "/paired/relay") {
+        pairedCors(req, res);
+        if (req.method === "OPTIONS") return (res.statusCode = 204), void res.end();
+        deskPorts.add(req.socket.localPort);
+        const who = pairs.check(req);
+        if (!who) return send(res, 401, { error: "This page isn't paired with the desktop, or its pairing was removed. Pair it again from the desktop: Settings → Classic." });
+        if (url.pathname === "/paired/hello") return send(res, 200, { ok: true, desktop: "PDA SEASIDE", pairing: who.name });
+        if (req.method !== "POST") return send(res, 405, { error: "POST a request for the relay." });
+        return void (await relay(req, res, JSON.parse((await readBody(req, 60_000_000)).toString("utf8") || "{}"), notTheDesktop(req)));
+      }
       // Vector's own interface, for its window in the desktop (on the desktop's address: it uses the API)
       if (url.pathname.startsWith("/vector-app/") && (!isAppHost(req) || lan())) {
         const rel = decodeURIComponent(url.pathname.slice("/vector-app/".length));
@@ -609,7 +1386,10 @@ export function deskServer() {
       }
       if (url.pathname.startsWith("/api/")) {
         if (isAppHost(req) && !lan()) return send(res, 403, { error: "Not available to apps." });
-        if (fromElsewhere(req)) return send(res, 403, { error: "Only the desktop's own page can use this." });
+        // (a character's link to a big file is clicked from Discord, Vector or anywhere: the ticket in it is the
+        // permission, for that one file, for a day, and fetching it changes nothing)
+        const ticketLink = req.method === "GET" && url.pathname.startsWith("/api/library/get/");
+        if (fromElsewhere(req) && !ticketLink) return send(res, 403, { error: "Only the desktop's own page can use this." });
         return await api(req, res, url);
       }
       // AICord's sign-in sends the browser back here (a top-level visit from aicordapp.com, so not under /api;
@@ -639,11 +1419,11 @@ export function deskServer() {
       root = config.root;
       let saved = "";
       try {
-        saved = JSON.parse(fs.readFileSync(path.join(root, "pdd.config.json"), "utf8")).dataDir || "";
+        saved = JSON.parse(fs.readFileSync(configFile(), "utf8")).dataDir || "";
       } catch {
         saved = "";
       }
-      // a folder saved on another kind of computer (F:\... copied over to a Mac) means nothing here: use the default
+      // a folder saved on another kind of computer (a Windows D:\... copied over to a Mac) means nothing here: use the default
       if (process.platform !== "win32" && /^[a-zA-Z]:[\\/]/.test(saved)) {
         console.warn(`[pandora] The saved data folder ${saved} is a Windows path; using ./data instead (choose another in Settings).`);
         saved = "";
@@ -652,9 +1432,15 @@ export function deskServer() {
       publicDir = config.publicDir || path.join(root, "public");
     },
     configureServer(server) {
+      server.httpServer?.on("upgrade", pictureSocket);
+      // the full browser closes with the desktop, so its profile is free next time
+      server.httpServer?.once("close", () => (void engine.close(), stdio.closeAll(), inbound.close()));
+      // (a listener here replaces Node's own exit on Ctrl+C, so it exits itself once the engine is closed)
+      for (const sig of ["SIGINT", "SIGTERM"]) process.once(sig, () => (stdio.closeAll(), void Promise.resolve(engine.close()).finally(() => process.exit(130))));
       server.middlewares.use(handle);
     },
     configurePreviewServer(server) {
+      server.httpServer?.on("upgrade", pictureSocket);
       server.middlewares.use(handle);
     },
   };

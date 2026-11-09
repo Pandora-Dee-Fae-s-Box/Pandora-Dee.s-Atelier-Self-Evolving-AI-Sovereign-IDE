@@ -1,17 +1,33 @@
-# Pandora Dee Desktop — 3.14.0
+# 🌊 PDA SEASIDE · Pandora Dee's Atelier — 3.16.0
 
-A desktop you share with Pandora Dee, Jade and their friends. It brings together the original Pandora Dee page, Jade Vault, and the atelier "desk" builds into one app you can test.
+*SEASIDE: the **S**elf-aware **E**volving **A**daptive **S**overeign **IDE**. Working, in daily use, and open.*
 
-**Status:** first release, MUCH more to come!!
+**A desktop you share with Pandora Dee, Jade and their friends.** ✨ Chat with them, hang out in a little scene together,
+play games, make music and pictures, keep your notes, and reach it all from your phone. It brings together the original
+Pandora Dee page, Jade Vault, and the atelier "desk" builds into one app, and it runs on **your own computer**: nothing
+leaves it unless you say so. 🔒
 
-## Start it
+**Status:** first release, MUCH more to come!! 🚀
+
+## 🗺️ A quick tour
+
+- 💬 **Room** and 🌴 **Hangout**: talk with the characters, or watch them in their scene and let them talk among themselves.
+- 🎮 **Games & Apps**: 51 games plus the Vector community's Mini Apps; the characters can play along.
+- 🎵 **Music** and 🎨 **Create**: your music, internet radio, visualizers, songs and pictures made with your own engines.
+- 📝 **Notes**: linked notes with tags, tasks and a graph, which the characters can read and write with you.
+- 📁 **Explorer**: the desktop's files, and **sharing between your own devices** on your home network.
+- 📱 **Phones**: the whole desktop in your phone's browser, or installed as an app, with **Share to PDA SEASIDE** in its share menu.
+- 🧸 **Toddler mode**: media, games and notes with every AI feature resting, for little ones.
+- 🏛️ **Classic**: the original Pandora Dee and Jade Vault apps, unchanged, one click away.
+
+## ▶️ Start it
 
 You need [Node.js](https://nodejs.org) 20 or newer.
 
-- **Windows:** double-click `Start Pandora Dee.bat`. The first run installs what it needs, then your browser opens at http://localhost:15693.
-- **Mac:** double-click `Start Pandora Dee.command` (the first time, right-click it → Open, since it isn't from the App Store;
+- 🪟 **Windows:** double-click `Start Pandora Dee.bat`. The first run installs what it needs, then your browser opens at http://localhost:15693.
+- 🍎 **Mac:** double-click `Start Pandora Dee.command` (the first time, right-click it → Open, since it isn't from the App Store;
   if it won't run, `chmod +x "Start Pandora Dee.command"`). It installs on the first run and opens your browser.
-- **Linux / by hand:**
+- 🐧 **Linux / by hand:**
 
 ```bash
 npm install
@@ -20,20 +36,38 @@ npm run dev
 
 Then open http://localhost:15693.
 
-**On your phone, as an app:** reach the desktop over https and install it (Help → Install as an app, or the
-browser's "Install app"). The easy https is Tailscale: on the computer running the desktop, `tailscale serve --bg 15693`,
-then open `https://<computer>.<tailnet>.ts.net` on the phone (signed into the same Tailscale). Only your own devices can
-reach that address. Don't use Tailscale Funnel for this: it would put the desktop, which has no sign-in, on the
-public internet. Over plain http a phone can only add a shortcut.
+## 📱 On your phone (and your other devices)
+
+**As an app:** reach the desktop over https and install it (Help → Install as an app, or the browser's "Install app").
+The easy https is Tailscale: on the computer running the desktop, `tailscale serve --bg 15693`, then open
+`https://<computer>.<tailnet>.ts.net` on the phone (signed into the same Tailscale). Only your own devices can reach
+that address. Don't use Tailscale Funnel for this: it would put the desktop, which has no sign-in, on the public
+internet. Over plain http a phone can only add a shortcut.
+
+**On the same Wi-Fi:** run `npm run dev -- --host` and open the address it prints (for example `http://192.168.1.20:15693`).
+If a phone can't connect, check that the computer's firewall lets Node in and that the router isn't keeping Wi-Fi
+devices apart ("AP isolation"); restarting the router has fixed it before. Passwords and passcodes need localhost or
+https, so set accounts up from the computer itself (the desktop says so when an address can't).
+
+**Made for touch:** the dock runs along the bottom (or the top; drag its grip) and scrolls sideways; Android's back
+gesture closes what's on top instead of leaving; Settings shows its sections as tabs; Copy works on the Wi-Fi address too.
+
+**Sharing between your devices** 📂 (all off until you choose):
+- **From the computer:** in Explorer, share a folder (its menu) or the whole computer (a switch) with your other devices.
+- **From a phone or another computer:** Explorer's 📱 button shares picked files (or a folder, in Chrome and Edge) for as
+  long as that page stays open. Nothing is copied: the others open, watch and download them straight from that device,
+  videos included, skipping around as they like. Shared files can't be changed or deleted from elsewhere.
+- **Share to PDA SEASIDE** 📤: once the desktop is installed as an app, it appears in the phone's own share menu. Save
+  what you share on the desktop (Vault › From devices), so the phone can free up the space, or share it live.
 
 **Moving it to another computer** (say from a Windows PC to the Mac): `git clone` the repository there, or copy the folder
 without `node_modules/`, `data/` and `pdd.config.json` (those belong to the first computer), for example
 `rsync -a --exclude node_modules --exclude data --exclude pdd.config.json pandora-desktop/ mac.local:pandora-desktop/`.
 If `node_modules` does come along, the Mac starter notices it's from another system and reinstalls; a data folder
 saved as a Windows path (F:\…) is ignored on the Mac. Your keys, chats and vault stay on the first computer unless
-you move them with a backup (Settings → Backup). To reach it from a phone on the same Wi-Fi, run `npm run dev -- --host` and open the address it prints (passwords need localhost or https, so set accounts up from the computer itself).
+you move them with a backup (Settings → Backup).
 
-## Give the characters a mind
+## 🧠 Give the characters a mind
 
 The characters need a model to talk. **Settings → AI**:
 
@@ -43,7 +77,7 @@ The characters need a model to talk. **Settings → AI**:
 - API keys go in **Keys**. Connections refer to them by name.
 - Anything that isn't on this computer is blocked until you allow it in **Settings → Privacy**, after reading what it shares.
 
-## What's here
+## 🪟 What's here
 
 | Window | What it does |
 | --- | --- |
@@ -54,48 +88,126 @@ The characters need a model to talk. **Settings → AI**:
 | **Vector** | Vector itself, the private, encrypted messenger: **install and open Vector's own app** from here (downloaded from Vector's GitHub releases and checked against the release's checksum), with everything it offers, including signing in from your phone so your key never touches the computer. A QR code gets the Android app onto a phone. **Vector's own app inside the desktop** too, in its window and on the phones that open the desktop: Vector built from its source in host mode, with its own data folder so it runs next to any Vector you already have (see *Vector's app inside the desktop* below). Or a lighter **built-in client** in the window: your own account's direct chats and Communities, files, and Mini Apps (webxdc) that open straight into Games & Apps, or go back into a chat from there. Sign in with your key (kept in Keys on that device if you like) or make a new identity. Runs Vector's own `vector-agent` on the computer with the desktop: build it from Vector's repository (`cargo build --release -p vector-agent`) and put it in the data folder's `vector` folder. The characters' Vector accounts stay on the bridges. |
 | **Browser** | Web pages in tabs: back and forward, bookmarks, a start page, search from the address bar (DuckDuckGo, or your SearXNG), and **Reader** for any page as clean text. Pages come through the desktop into a sandboxed frame that can't reach the desktop, its keys or the apps; sign-ins don't carry over, so “Open in your browser” is there for those. Pages on this computer don't open in it. |
 | **Create** | **Imagine**: pictures from a picture engine you run (ComfyUI, Draw Things or Automatic1111/Forge, or an OpenAI-style image service), usually on another computer on your network, saved into the vault. A **Gallery** of the pictures and PDFs in your vault, **Paint** (miniPaint, right in the window and kept offline) that opens and saves them in the vault, and **Apps** to install and open them in: GIMP (found if you already have it), Krita and Inkscape through your package manager, and Storytold's open-source Craft apps (PhotoCraft, PdfCraft, VectorCraft, LightCraft, ArtCraft) from their GitHub releases, checked against each release's SHA-256. Right-click a picture to choose where it opens. |
-| **Music** | **Make a song**, the Suno/Udio way: describe it and a character writes the title, style and lyrics, or write them yourself (style chips, section tags), pick the length, and a song engine makes it: MLX Audio on a Mac through `scripts/mlx-music-bridge.py` (MiniMax Music 3 and other mlx_audio.music models), mlx-serve / MLX Core (MiniMax Music 3, ACE-Step 1.5 XL), ACE-Step 1.5's own API, or YuE2 through ComfyUI. You choose the model; none is shipped, with no ComfyUI screens to deal with. Songs land in your library, with Remix and their words kept. Your music folders (read where they are, subfolders and folder links too, picked with Browse… or typed) and files you add, Shuffle all, Shuffle albums (each album played through) and Shuffle artists (each one's albums in order), internet radio from radio-browser.info, a **Worldband** map of about 5,000 stations to tune by clicking, sweeping a dial or scanning, a queue with shuffle and repeat, and visualizers: bars, a scope, or Milkdrop (Butterchurn, with presets you can import), in Music, in their own resizable window, full screen, or as the desktop background. Music lowers itself while a character speaks. Characters can play, pause, skip and queue for you, and (if you turn it on) say something when a new song starts, after listening to it for a few seconds. |
+| **Music** | **Make a song**, the Suno/Udio way: describe it and a character writes the title, style and lyrics, or write them yourself (style chips, section tags), pick the length, and a song engine makes it: MLX Audio on a Mac through `scripts/mlx-music-bridge.py` (MiniMax Music 3 and other mlx_audio.music models), mlx-serve / MLX Core (MiniMax Music 3, ACE-Step 1.5 XL), ACE-Step 1.5's own API, or YuE2 through ComfyUI. You choose the model; none is shipped, with no ComfyUI screens to deal with. Songs land in your library, with Remix and their words kept. Your music folders (read where they are, subfolders and folder links too, picked with Browse… or typed) and files you add, **Other devices**: any phone or computer can share its own music (a folder, or picked songs on a phone); the files stay on it, and every other device plays them from it while its page is open, or copies them to the server, Shuffle all, Shuffle albums (each album played through) and Shuffle artists (each one's albums in order), internet radio from radio-browser.info, a **Worldband** map of about 5,000 stations to tune by clicking, sweeping a dial or scanning, a queue with shuffle and repeat, and visualizers: bars, a scope, or Milkdrop (Butterchurn, with presets you can import), in Music, in their own resizable window, full screen, or as the desktop background. Music lowers itself while a character speaks. Characters can play, pause, skip and queue for you, and (if you turn it on) say something when a new song starts, after listening to it for a few seconds. |
+| **Explorer** | The desktop's files: the vault, Vector's files, your music folders, and (only on the computer itself, when you switch it on) the rest of the computer. Previews, rename in place, new folders, upload from the device you're on, download to it, and a trash that puts things back where they were. Share folders or the whole computer with your other devices, and see what they share with you (see *On your phone* above). Vector's file dialogs and "Reveal in folder" open here too. |
 | **Files** | Each character's own files. SOUL.md (who they are), AGENTS.md (how they carry themselves) and MEMORY.md are read at the start of every conversation, so editing them changes the character. |
-| **Journal** | Each character's quest journal and memory. "Write today's entry" and "Reflect into memory" ask the character to do it in their own voice. |
-| **Terminal** | A shell over a character's files (`help` lists the commands). `ask` talks to the character privately. |
-| **Games & Apps** | 51 built-in games plus your Vector apps (webxdc). Sections, search, sort, and four views (big tiles, cards, details list, compact). Every version of an app stays installed: pick which one Play opens, play any other, and choose whether versions share their game state. Import single `.xdc` files, a `.zip` of them, or a folder (drag and drop works too); identical files are kept once. Characters can play along: they read the screen, read the app's shared state, and send their own moves. |
+| **Journal** | Each character's quest journal and memory. "Write today's entry" and "Reflect into memory" ask the character to do it in their own voice. With the **Storybook** on (Settings → Chat, or per character), each branch is also a book in their files and each chat its next scene, told twice: what happened in the room, and what they thought inside. |
+| **Terminal** | **Real terminal:** a real shell on the computer running SEASIDE (PowerShell on Windows, your own shell on a Mac or Linux), each in a workspace folder of its own (`<data folder>/workspaces/<name>`), from this computer or your tailnet. A desk for building things, and for residents like Claude Code. Off until Privacy → *A real terminal on this computer*; closing the window keeps the shell running, and taking the consent back ends them all. **Character files:** a shell over a character's files (`help` lists the commands); `ask` talks to the character privately. |
+| **Games & Apps** | 51 built-in games, over twenty webxdc apps shared by the Vector community to play and build on together (chess, Gomoku, MachStrike, Vexel, Strudel, Arcane Dungeon, Telengard and more; see NOTICE), plus your own Vector apps. Sections, search, sort, and four views (big tiles, cards, details list, compact). Every version of an app stays installed: pick which one Play opens, play any other, and choose whether versions share their game state. Import single `.xdc` files, a `.zip` of them, or a folder (drag and drop works too); identical files are kept once. Characters can play along: they read the screen, read the app's shared state, and send their own moves. |
 | **XDC Studio** | Open any version of a Vector app and look inside. Imported versions stay untouched; "New version" makes an editable copy, which you can change here or in your own editor (its folder is shown), run, and save as `.xdc`. "New app from a template" starts a working multiplayer app. |
 | **Hangout** | The scene on its own: the characters stand in it (talking bust, chibi, photo, or a full avatar: Live2D, VRM 3D, or an animated picture, with lip-sync; right-click a character to switch, and add avatars in their profile; with speech bubbles), wander a little, and can be dragged around. A slim chat bar and a few recent lines sit at the bottom; the rest of the desktop steps aside. Dock button, View → Hangout, or Ctrl/⌘+Shift+H; Esc comes back. They can also stand on the normal desktop behind the windows. Right-click the scene to choose the chat: the conversation (whole replies, scrolling) and the typing bar, only the bar, or none (Enter still opens the bar). |
 | **Voice** | Replies read aloud with this computer's voices, or a voice engine you run: MLX Audio on a Mac (Kokoro's voices), OpenAI, or any server with OpenAI's speech API, with a voice per character and lips that follow the audio. Talk instead of typing with the 🎤 button in the Room and Hangout (Whisper through the same engine; phones need the https address). If an engine can't be reached, this computer's voices take over. |
-| **Connections** | Everything that reaches past this computer, matching Pandora Dee and Jade Vault. **Discord and Vector** through their existing bridges: you (their locksmith), admins and the public each get what Classic gives them (people who aren't you never see your memory or files), trigger words, DM rules, pictures, Mini Apps, community invites, the Discord archive. **Inbox**: the secretary files messages for you. **Tool servers (MCP)**: direct, deferred, codemode or hidden, per server and per tool, resources, and mcp.json in and out. **Web**: Ollama web search, SearXNG, DuckDuckGo or Wikipedia. **SSH** to your own machines, with key approval and ask-before-commands. **Inbound API**: Classic's `/v1` routes for scripts and other apps. |
+| **Connections** | Everything that reaches past this computer, matching Pandora Dee and Jade Vault. **Discord and Vector** through their existing bridges: you (the person they work with), admins and the public each get what Classic gives them (people who aren't you never see your memory or files), trigger words, DM rules, pictures, Mini Apps, community invites, the Discord archive. **Inbox**: messages the characters pass on to you, filed. **Tool servers (MCP)**: direct, deferred, codemode or hidden, per server and per tool, resources, and mcp.json in and out. **Web**: Ollama web search, SearXNG, DuckDuckGo or Wikipedia. **SSH** to your own machines, with key approval and ask-before-commands. **Inbound API**: Classic's `/v1` routes for scripts and other apps. |
 | **Sentry** | The flood gate (on by default) and the device watch (off by default; needs Privacy permission plus the adult passcode or shelf). |
 | **Keys** | API keys and tokens, like environment variables. Never shown again, never in backups. |
 | **Settings** | AI, look (text size, scale, wallpaper, menu bar), voice, privacy, accounts, adult shelf, backup and reset. |
-| **Classic** | The original apps, unchanged: Pandora Dee 2.9.9.2 (and 2.9.0) and Jade Vault 2.18.2, built from their latest sources. The round button in the corner switches app and version or returns to the desktop (Ctrl/⌘+Shift+K). Each app keeps its own notes and settings. |
+| **Classic** | The original apps: Pandora Dee 2.10.2 and Jade Vault 2.25.0-enhanced by default (the People layer, the Vault Tree and the Storybook; Pandora's first notes in her own voice), built from the AETHER-ENGINEERS forks, with every earlier build still there to pick (Pandora Dee 2.10.1, 2.9.9.2 and 2.9.0, Jade Vault 2.22.1, 2.18.2 and the rest). The round button in the corner switches app and version or returns to the desktop (Ctrl/⌘+Shift+K). Each app keeps its own notes and settings. |
 
-### The dock, keyboard and touch
+### 🖐️ The dock, keyboard and touch
 
 - The dock can sit on any edge (drag its grip, or right-click it), hide until needed, show names, and hold whichever apps you choose in any order (Settings → Dock).
 - Every desktop action has a shortcut you can change (Settings → Keyboard). Shortcuts with Ctrl/⌘+Shift work even while a game has the keyboard.
 - Touch: tap a character to have them answer, drag them around, hold for options; double-tap the empty desktop for Hangout; swipe in from the edge for a hidden dock (Settings → Touch).
 
-### Where things are kept
+### 📦 Where things are kept
 
-Vector apps and their saved game state live in a folder (Settings → Storage; this machine uses `F:\pandora-data`). Apps run on `127.0.0.1` while the desktop runs on `localhost`: two separate origins, so an app can never read the desktop's keys. Apps also can't reach the internet, as the webxdc standard requires. Characters, settings and the conversation live in the browser.
+Vector apps and their saved game state live in a folder (Settings → Storage). Apps run on `127.0.0.1` while the desktop runs on `localhost`: two separate origins, so an app can never read the desktop's keys. Apps also can't reach the internet, as the webxdc standard requires. Characters, settings and the conversation live in the browser.
 
-### What characters can do (tools)
+### 🛠️ What characters can do (tools)
 
-With a model that supports tools (qwen3, llama 3.1+, gpt-oss, mistral…): list, read, write, append and search their own files; remember things; write their journal; read the open game's screen; read a Vector app's shared state and send their own updates and live messages (so they can join XDC-Chess as a real peer); post on Discord or Vector when connected; any tool from connected MCP servers; and, if Privacy allows web access, search the web, read pages, and call web APIs using `{{KEY_NAME}}` from Keys without seeing the key.
+With a model that supports tools (qwen3, llama 3.1+, gpt-oss, mistral…): list, read, write, append and search their own files; run shell commands over them (`bash`, as in Classic, with `mcp` to manage and call their own tool servers, including the ones in their own mcp.json); remember things; write their journal; read the open game's screen; read a Vector app's shared state and send their own updates and live messages (so they can join XDC-Chess as a real peer); post on Discord or Vector when connected; any tool from connected MCP servers; and, if Privacy allows web access, search the web, read pages, and call web APIs using `{{KEY_NAME}}` from Keys without seeing the key.
 
-On Discord and Vector, only you (the locksmith: the id you set) get the tools; everyone else just talks.
+On Discord and Vector, only you (the id you set) get the tools; everyone else just talks.
 
-### Safety pieces
+### 🛡️ Safety pieces
 
 - **Privacy:** None (default: nothing leaves the computer), Some (opt in feature by feature after reading the risk), or Conditional (like Some, only during hours you choose). The top bar always says "Local only" or that something is going out.
 - **Streamer mode:** hides the names and/or messages of people coming in from Discord and Vector, plus anyone on the always-anonymous list. The characters stay on screen.
-- **Flood gate:** 6 messages in 20 seconds, the same message 3 times, one huge message, or several large ones shut the gate. The characters stop and general access is off until the keyholder reopens it.
+- **Flood gate:** 6 messages in 20 seconds, the same message 3 times, one huge message, or several large ones shut the gate. The characters stop and general access is off until you reopen it.
 - **Loop breaker:** stops repeats, and waits for you after 6 character replies in a row. Off, it still stops at 16.
 - **Accounts:** optional. The first account holds the keys. No password (the picture opens it) or a password (salted hash only), with "Always remember".
 - **Adult shelf:** the desktop starts in family mode. Adult characters stay hidden until unlocked with the passcode, and it locks again with the desktop.
+- **Toddler mode:** 🧸 Settings → Adult shelf. Notes, Music, the visualizer, Create, Games and Hangout stay; the other apps, Classic and the adult shelf are put away, and every AI feature rests (they can cost money). It stays on after a restart; only the passcode turns it off (the 🧸 in the top bar).
 
 Everything is stored in your browser on your computer. **Settings → Backup and reset** saves or restores the whole desktop (without keys, passwords or the passcode), and can back up on a schedule to your own server (Jade Vault's `jade-backup-server.py`), encrypted on your computer first.
 
-## For developers
+## 🧰 Troubleshooting
+
+**The name changed.** This was *Pandora Dee Desktop*, and the repository was
+`Pandora-Dee.s-Atelier-Self-Evolving-AI-Sovereign-IDE`. It's now **PDA SEASIDE** (the Self-aware Evolving Adaptive
+Sovereign IDE) at `Pandora-Dee.s-Atelier-Self-Aware-Evolving-Adaptive-Sovereign-IDE`. Nothing breaks: GitHub sends the
+old address to the new one, your saved desktop keeps its storage under the old names, and an installed app takes the new
+name the next time the browser refreshes it. To point an existing copy at the new address:
+
+```bash
+git remote set-url origin https://github.com/AETHER-ENGINEERS/Pandora-Dee.s-Atelier-Self-Aware-Evolving-Adaptive-Sovereign-IDE.git
+```
+
+The starters are still called `Start Pandora Dee.bat` and `.command`, so your shortcuts keep working.
+
+**It won't start.**
+- *"Port 15693 is already in use":* another copy is already running (perhaps in a window you minimised). Use that one, or
+  close it first.
+- *Errors while installing:* check `node --version` says 20 or newer. After an update, delete `node_modules` and start
+  again, so it reinstalls.
+
+**The characters don't answer.**
+- *"Couldn't reach Ollama on this computer":* start the Ollama app (or `ollama serve`) and press **Check** in Settings → AI.
+- *A connection is skipped, or says Privacy blocks it:* anything off this computer needs its Privacy feature turned on.
+  Click the orange **SENSITIVE** tag next to it: it opens Settings → Privacy at that feature.
+- *Ollama on another computer (a Mac on your Wi-Fi):* on that computer, Ollama has to listen beyond itself:
+  `OLLAMA_HOST=0.0.0.0` in its environment, then restart Ollama. Use its address in Settings → AI, e.g.
+  `http://192.168.1.20:11434`.
+- *"no credits left (402)"* comes from the service (AICord, OpenRouter…), not from SEASIDE: top up there, or move another
+  connection first.
+- *"Prompt too long" / "exceeded max context length":* SEASIDE trims older lines and tries again by itself (up to three
+  times). If it keeps happening, lower **Settings → Conversations → Messages sent with each reply** or use a model with a bigger context.
+
+**A reply has an amber "!" row.** That's the desk telling the character something plainly: a tool it said it would use
+but never called, or an answer that stayed inside its thinking so nobody saw it. Each happens at most once a turn; open the
+row to see the note. Every tool call shows as a row too (✓, ✗ or … while it runs), opening to what was sent and what came
+back.
+
+**Web search finds nothing.** With no provider set, SEASIDE searches DuckDuckGo's plain results page. A SearXNG of your
+own (Connections → Web) or an Ollama key (Keys → `OLLAMA_API_KEY`) is steadier. Characters can also search in their own
+browser tab, like anyone browsing. Both need Privacy → **Web access for characters**.
+
+**A separate account for shells.** Shells in the real terminal normally run as you, so they could reach the
+characters' vaults (each vault's master key is guarded for your own account). Terminal → Real terminal → **Separate
+account** runs them as another account instead, over SSH to this computer: they, and anything run in them (Claude Code
+included), can't open any character's keys. It still reads whatever your drives let every account read, so keep private
+folders private. Set it up once (as an administrator):
+
+- **Windows** (PowerShell as administrator), one line each:
+
+  ```powershell
+  Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+  net user seaside-shell (New-Guid).Guid /add
+  ```
+
+  Then in `C:\ProgramData\ssh\sshd_config`, so it's reachable from this computer only and by key only:
+  `ListenAddress 127.0.0.1`, `PasswordAuthentication no` and `AllowUsers seaside-shell`. Start it:
+  `Set-Service sshd -StartupType Automatic; Start-Service sshd`. Put SEASIDE's key (Terminal → Separate account → Copy)
+  in `C:\Users\seaside-shell\.ssh\authorized_keys`, readable only by that account, SYSTEM and Administrators:
+  `icacls C:\Users\seaside-shell\.ssh\authorized_keys /inheritance:r /grant "seaside-shell:R" /grant "SYSTEM:F" /grant "Administrators:F"`.
+- **Mac**: System Settings → Users & Groups → add a Standard user `seaside-shell`; General → Sharing → Remote Login on,
+  for that user only; put SEASIDE's key in `/Users/seaside-shell/.ssh/authorized_keys` (owned by that user, mode 600).
+- **Linux**: `sudo adduser --disabled-password seaside-shell`, install `openssh-server`, set `ListenAddress 127.0.0.1`
+  and `PasswordAuthentication no`, and put the key in `~seaside-shell/.ssh/authorized_keys` (mode 600).
+
+The first shell pins this computer's SSH host key; if it ever changes, SEASIDE refuses until you forget the old one
+there.
+
+**Keys or passwords don't show on a phone.** They only open on the computer itself or over Tailscale's https, never over
+plain Wi-Fi http. See *On your phone* above.
+
+**Something looks stuck after an update.** Reload the page. If a window still shows old behaviour, close SEASIDE's
+terminal window and start it again: server changes need a restart.
+
+**Losing things.** Your desktop lives in this browser on this computer. Make a backup (Settings → Backup and reset)
+before clearing the browser's data, switching browsers or moving computers.
+
+## 👩‍💻 For developers
 
 ```bash
 npm test        # logic tests (flood gate, room, loop breaker, shell, privacy, backups, xdc manifests)
@@ -114,6 +226,19 @@ The Vector window can show Vector's own app: its interface, served by the deskto
 node vector-host/build.mjs --vector <checkout of github.com/VectorPrivacy/Vector> --out <data folder>/vector-host/app
 ```
 
-It needs Node, Rust, and on Windows Microsoft's C++ build tools. Without Visual Studio (or room on C:), [portable MSVC](https://gist.github.com/mmozeiko/7f3162ec2988e81e56d5c4e22cde9977) unpacks Microsoft's compiler and SDK into any folder: pass it with `--msvc <folder>`. `--target` and `--cargo-home` put the build (5–10 GB) and cargo's downloads on another drive. It builds without Whisper and Tor, with lighter optimization than Vector's releases.
+It needs Node, Rust, CMake (Vector 0.5.1 builds the Opus codec with it), and on Windows Microsoft's C++ build tools. Portable CMake and Ninja folders work: pass them with `--cmake <folder>` and `--ninja <folder>`. Without Visual Studio (or room on C:), [portable MSVC](https://gist.github.com/mmozeiko/7f3162ec2988e81e56d5c4e22cde9977) unpacks Microsoft's compiler and SDK into any folder: pass it with `--msvc <folder>`. `--target` and `--cargo-home` put the build (5–10 GB) and cargo's downloads on another drive. It builds without Whisper and Tor, with lighter optimization than Vector's releases.
 
 Original characters are shared under the AETHER-ENGINEERS Multiversal License. Jade and Jade Vault are their creator's work. Games by SunkissedButterfly (websim.ai).
+
+## 💬 Contact us
+
+<a href="https://vectorapp.io/invite/naddr1qqqqygp7j0d49zp08p53dggzp0rnje3us84gkzz354xv374la2h5ht4jwgpsgqqqsg2szv46a8#BAADAQIAGG5vc3RyLmNvbXB1dGluZ2NhY2hlLmNvbe4V4ezgMXHoqov9L_H54zQ"><img src="docs/images/vector-logo.svg" alt="Vector" width="72" align="left" /></a>
+
+**Come say hi on Vector Messenger** ✨<br/>
+Join the AETHER-ENGINEERS group for questions, ideas, bug reports, or just to chat. Pandora Dee and Jade hang out there too (the app connects them to Vector through its bridge).<br/>
+👉 **[Join us on Vector](https://vectorapp.io/invite/naddr1qqqqygp7j0d49zp08p53dggzp0rnje3us84gkzz354xv374la2h5ht4jwgpsgqqqsg2szv46a8#BAADAQIAGG5vc3RyLmNvbXB1dGluZ2NhY2hlLmNvbe4V4ezgMXHoqov9L_H54zQ)**
+
+<br clear="left" />
+
+<sub>New to Vector? It's a private, encrypted messenger: get it at <a href="https://vectorapp.io">vectorapp.io</a>. Vector and its logo are trademarks of Formless Labs, used here to link to Vector.</sub>
+

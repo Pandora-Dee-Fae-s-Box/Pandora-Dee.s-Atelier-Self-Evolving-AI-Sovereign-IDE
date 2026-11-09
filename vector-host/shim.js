@@ -15,7 +15,47 @@
   const replacer = (_k, v) => (ArrayBuffer.isView(v) ? Array.from(v) : v instanceof ArrayBuffer ? Array.from(new Uint8Array(v)) : v instanceof Map ? Object.fromEntries(v) : v);
   const decOut = (v) => (v && typeof v === "object" && typeof v.__b64 === "string" ? unb64(v.__b64).buffer : v);
 
+  // ── asking the desktop's window (Explorer, its dialogs, Games & Apps); the page is on the desktop's own address ──
+  const deskWaits = new Map();
+  let deskSeq = 0;
+  window.addEventListener("message", (e) => {
+    if (e.source !== window.parent || e.origin !== location.origin || !e.data?.pddReply) return;
+    deskWaits.get(e.data.id)?.(e.data.value);
+    deskWaits.delete(e.data.id);
+  });
+  const inDesk = window.parent !== window;
+  const askDesk = (type, data = {}) =>
+    new Promise((resolve) => {
+      const id = ++deskSeq;
+      deskWaits.set(id, resolve);
+      window.parent.postMessage({ pddVector: type, id, ...data }, location.origin);
+    });
+
+  // Troubleshooting: the page's own errors go into the desktop's Vector trail (Connections, and /api/vector-host/status)
+  // as one shortened line each, repeats skipped. They pass as a command name the engine doesn't know (it says so and
+  // nothing happens), so no server change is needed for this.
+  const reported = new Set();
+  const report = (what) => {
+    const line = `⚠ page: ${String(what).replace(/\s+/g, " ").slice(0, 160)}`;
+    if (reported.has(line) || reported.size > 40) return;
+    reported.add(line);
+    fetch(`${API}/invoke`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cmd: line, args: {} }) }).catch(() => {});
+  };
+  window.addEventListener("error", (e) => report(`${e.message} (${String(e.filename || "").split("/").pop()}:${e.lineno})`));
+  window.addEventListener("unhandledrejection", (e) => report(e.reason?.stack?.split("\n").slice(0, 2).join(" ← ") || e.reason));
+  const consoleError = console.error.bind(console);
+  console.error = (...a) => {
+    consoleError(...a);
+    report(a.map((x) => (x instanceof Error ? x.message : typeof x === "string" ? x : "")).join(" "));
+  };
+
   async function invoke(cmd, args = {}) {
+    // a Mini App opens in Games & Apps (added there first if this version is new), not in a window of its own
+    if (cmd === "miniapp_open" && inDesk) {
+      const r = await askDesk("miniapp", { path: args.filePath });
+      if (r?.error) throw r.error;
+      return null;
+    }
     const r = await fetch(`${API}/invoke`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -75,7 +115,20 @@
     if (!r.ok) throw j.error || "Upload failed";
     return j.path;
   }
-  function pick({ multiple = false, filters = [], directory = false } = {}) {
+  async function pick({ multiple = false, filters = [], directory = false, title } = {}) {
+    // inside the desktop: Explorer is the picker (it can upload from the device being used, too)
+    if (inDesk) {
+      const paths = await askDesk("pick", { mode: directory ? "folder" : "open", multiple, filters, title });
+      return paths?.length ? (multiple ? paths : paths[0]) : null;
+    }
+    return browserPick({ multiple, filters, directory });
+  }
+  async function save({ defaultPath = "", filters = [], title } = {}) {
+    if (!inDesk) return null;
+    const paths = await askDesk("pick", { mode: "save", filters, title, defaultName: String(defaultPath).split(/[\\/]/).pop() });
+    return paths?.[0] ?? null;
+  }
+  function browserPick({ multiple = false, filters = [], directory = false } = {}) {
     if (directory) {
       alert("Choosing a folder isn't available inside the desktop yet. Use Vector's app on this computer for that.");
       return Promise.resolve(null);
@@ -111,9 +164,16 @@
   const win = new Proxy(
     {
       label: "main",
-      show: noop, hide: noop, close: noop, setFocus: async () => window.focus(), setOverlayIcon: noop, setBadgeCount: noop,
+      show: noop, hide: noop, setFocus: async () => window.focus(), setOverlayIcon: noop, setBadgeCount: noop,
       setTitle: async (t) => void (document.title = t), isVisible: async () => true, isFocused: async () => document.hasFocus(),
-      isMaximized: async () => false, isMinimized: async () => false, isFullscreen: async () => Boolean(document.fullscreenElement),
+      isMinimized: async () => false, isFullscreen: async () => Boolean(document.fullscreenElement),
+      // Vector 0.5's own title bar: its buttons work the desktop's Vector window; dragging is the desktop's title bar's job
+      minimize: async () => inDesk && void (await askDesk("window", { do: "minimize" })),
+      toggleMaximize: async () => inDesk && void (await askDesk("window", { do: "maximize" })),
+      close: async () => inDesk && void (await askDesk("window", { do: "close" })),
+      isMaximized: async () => (inDesk ? Boolean((await askDesk("window", { do: "state" }))?.maximized) : false),
+      startDragging: noop,
+      outerPosition: async () => ({ x: 0, y: 0 }),
       innerSize: async () => ({ width: innerWidth, height: innerHeight }), outerSize: async () => ({ width: innerWidth, height: innerHeight }),
       scaleFactor: async () => devicePixelRatio,
       onFocusChanged: async (fn) => (focusFns.add(fn), () => focusFns.delete(fn)),
@@ -161,18 +221,27 @@
     event: { listen, once, emit, TauriEvent: {} },
     dialog: {
       open: pick,
-      save: async () => (alert("Saving to a chosen place isn't available inside the desktop yet."), null),
-      message: async (m) => alert(m),
-      ask: async (m) => confirm(m),
-      confirm: async (m) => confirm(m),
+      save,
+      // the desktop's own dialogs (a browser one would pause its music and animations)
+      message: async (m, o = {}) => (inDesk ? void (await askDesk("ask", { title: o.title || "Vector", body: String(m), yes: o.okLabel || "OK", no: "" })) : alert(m)),
+      ask: async (m, o = {}) => (inDesk ? Boolean(await askDesk("ask", { title: o.title || "Vector", body: String(m), yes: o.okLabel || "Yes", no: o.cancelLabel || "No" })) : confirm(m)),
+      confirm: async (m, o = {}) => (inDesk ? Boolean(await askDesk("ask", { title: o.title || "Vector", body: String(m), yes: o.okLabel || "OK", no: o.cancelLabel || "Cancel" })) : confirm(m)),
     },
     app: { getVersion: () => invoke("plugin:app|version"), getName: async () => "Vector" },
     opener: {
       openUrl: async (u) => void window.open(u, "_blank", "noopener,noreferrer"),
-      openPath: noop,
-      revealItemInDir: noop,
+      // the desktop's Explorer, at that file
+      openPath: async (p) => inDesk && void (await askDesk("open", { path: String(p) })),
+      revealItemInDir: async (p) => inDesk && void (await askDesk("reveal", { path: String(p) })),
     },
-    window: { getCurrentWindow: () => win, getAllWindows: async () => [win] },
+    // currentMonitor: none here (Vector then leaves maximising to the window), and dpi's size types for completeness
+    window: { getCurrentWindow: () => win, getAllWindows: async () => [win], currentMonitor: async () => null },
+    dpi: {
+      PhysicalPosition: class { constructor(x, y) { Object.assign(this, { x, y }); } },
+      PhysicalSize: class { constructor(width, height) { Object.assign(this, { width, height }); } },
+      LogicalPosition: class { constructor(x, y) { Object.assign(this, { x, y }); } },
+      LogicalSize: class { constructor(width, height) { Object.assign(this, { width, height }); } },
+    },
     webview: { getCurrentWebview: () => win },
     webviewWindow: { getCurrentWebviewWindow: () => win },
     updater: { check: async () => null },

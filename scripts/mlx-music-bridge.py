@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-A song engine for Pandora Dee Desktop on an Apple Silicon Mac, using MLX Audio's music models
+A song engine for PDA SEASIDE on an Apple Silicon Mac, using MLX Audio's music models
 (MiniMax Music 3 and others under mlx_audio.music).
 
 MLX Audio's own server does speech, not songs. This small server answers the way mlx-serve's music endpoint
@@ -266,7 +266,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     global args
-    p = argparse.ArgumentParser(description="A song engine for Pandora Dee Desktop, using MLX Audio's music models.")
+    p = argparse.ArgumentParser(description="A song engine for PDA SEASIDE, using MLX Audio's music models.")
     p.add_argument("--host", default="0.0.0.0", help="address to listen on (default: all, so your other devices can reach it)")
     p.add_argument("--port", type=int, default=11235)
     p.add_argument("--model", default="", help="music model to use when a request names none, e.g. mlx-community/MiniMax-Music3-mxfp8")

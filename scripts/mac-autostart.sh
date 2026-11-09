@@ -1,5 +1,5 @@
 #!/bin/bash
-# Keep Pandora Dee Desktop's Mac engines running: MLX Audio's server (voices and listening, port 15666) and the
+# Keep PDA SEASIDE's Mac engines running: MLX Audio's server (voices and listening, port 15666) and the
 # music bridge (songs, port 11235). Uses launchd, the Mac's own service manager: they start when you log in,
 # restart if they stop, and write logs to ~/Library/Logs/pandora-*.log. No terminal has to stay open.
 #

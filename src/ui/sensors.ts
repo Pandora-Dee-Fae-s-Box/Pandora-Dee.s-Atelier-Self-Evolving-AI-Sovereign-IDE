@@ -38,6 +38,27 @@ export function useSensors() {
       document.addEventListener("visibilitychange", vis);
       off.push(() => document.removeEventListener("visibilitychange", vis));
     }
+    if (sensors.lan) {
+      // the local network, looked at every few minutes from the desktop's own computer (other pages are refused, and stop)
+      let stopped = false;
+      let timer = 0;
+      const look = async () => {
+        const r = await fetch("/api/lan/scan", { method: "POST" }).catch(() => null);
+        if (!r || stopped) return;
+        if (r.status === 403) return; // not the desktop's own computer: it watches, not this page
+        const j = (await r.json().catch(() => ({}))) as { fresh?: { kind: string; ip: string; name: string }[] };
+        for (const e of j.fresh ?? []) {
+          const who = e.name ? `${e.name} (${e.ip})` : e.ip;
+          note(e.kind === "new" ? `a new device is on the local network: ${who}.` : `${who} started sharing folders on the network.`);
+        }
+        timer = window.setTimeout(() => void look(), 5 * 60_000);
+      };
+      void look();
+      off.push(() => {
+        stopped = true;
+        window.clearTimeout(timer);
+      });
+    }
     if (sensors.battery) {
       const nav = navigator as Navigator & { getBattery?: () => Promise<BatteryLike> };
       let battery: BatteryLike | null = null;
@@ -58,5 +79,5 @@ export function useSensors() {
       off.forEach((fn) => fn());
       desk().log("Sentry device watch stopped.");
     };
-  }, [live, sensors.battery, sensors.network, sensors.screen]);
+  }, [live, sensors.battery, sensors.network, sensors.screen, sensors.lan]);
 }

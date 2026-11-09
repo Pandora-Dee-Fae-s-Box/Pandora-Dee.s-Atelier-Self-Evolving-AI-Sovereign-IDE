@@ -2,7 +2,12 @@
 
 export type Station = { name: string; url: string; favicon?: string; tags?: string; country?: string; codec?: string; bitrate?: number; homepage?: string };
 
+/** A playlist: a name and songs in order (by id, which is the file's path, so a rescan keeps it). */
+export type MusicPlaylist = { id: string; name: string; items: string[] };
+
 export type MusicPrefs = {
+  /** Playlists, shared by every device (the desk is). */
+  playlists: MusicPlaylist[];
   folders: string[];
   stations: Station[];
   volume: number;
@@ -24,4 +29,4 @@ export type MusicPrefs = {
   vizHeight: number;
 };
 
-export const MUSIC_DEFAULT: MusicPrefs = { folders: [], stations: [], volume: 0.7, shuffle: false, repeat: "all", duck: true, comment: false, viz: "bars", preset: "", cycle: true, vizBackground: false, vizBackgroundOpacity: 0.85, vizHeight: 180 };
+export const MUSIC_DEFAULT: MusicPrefs = { playlists: [], folders: [], stations: [], volume: 0.7, shuffle: false, repeat: "all", duck: true, comment: false, viz: "bars", preset: "", cycle: true, vizBackground: false, vizBackgroundOpacity: 0.85, vizHeight: 180 };

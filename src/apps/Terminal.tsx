@@ -1,14 +1,32 @@
 import { useEffect, useRef, useState } from "react";
 import { desk, useDesk } from "../lib/store.ts";
 import { run } from "../lib/shell.ts";
+import { mcpCommand } from "../lib/mcpshell.ts";
 import { privately } from "../lib/agent.ts";
 import { CharacterPicker } from "./Files.tsx";
+import { RealTerminal } from "./RealTerminal.tsx";
+import { Seg } from "../ui/common.tsx";
 import { findHost, openHost, sshOp } from "../lib/ssh.ts";
 import type { SshHost } from "../lib/store.ts";
 
 type Line = { kind: "in" | "out"; text: string; prompt?: string };
 
+/** The Terminal window: a real shell on this computer, or a character's own files. */
 export function TerminalApp() {
+  const [tab, setTab] = useState<"real" | "files">(() => (sessionStorage.getItem("pdd-term-tab") as "real" | "files") || "real");
+  useEffect(() => sessionStorage.setItem("pdd-term-tab", tab), [tab]);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <div className="toolbar">
+        <Seg value={tab} onChange={setTab} options={[{ id: "real", label: "Real terminal" }, { id: "files", label: "Character files" }]} />
+      </div>
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>{tab === "real" ? <RealTerminal /> : <FileShell />}</div>
+    </div>
+  );
+}
+
+/** A character's own files, with the shell commands that make sense there (lib/shell.ts), and SSH. */
+function FileShell() {
   const s = useDesk();
   const [charId, setCharId] = useState(s.focus || "dee");
   const [cwd, setCwd] = useState("");
@@ -110,6 +128,11 @@ export function TerminalApp() {
       const name = res.action.id;
       const hit = st.visibleCharacters().find((x) => x.short === name);
       if (hit) setCharId(hit.id);
+    }
+    if (res.action?.kind === "mcp") {
+      setLines((prev) => [...prev, { kind: "out", text: "…" }]);
+      const r = await mcpCommand(res.action.argv, charId);
+      setLines((prev) => [...prev.slice(0, -1), { kind: "out", text: r.out }]);
     }
     if (res.action?.kind === "ask") {
       setLines((prev) => [...prev, { kind: "out", text: `${c?.short} is thinking…` }]);

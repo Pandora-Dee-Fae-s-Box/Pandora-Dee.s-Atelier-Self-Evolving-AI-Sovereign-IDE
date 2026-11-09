@@ -117,14 +117,18 @@ export function VoiceEnginesEditor() {
               Test
             </button>
           </div>
+          <label className="check small" style={{ padding: 0 }}>
+            <input type="checkbox" checked={Boolean(e.clones)} onChange={(ev) => edit(e.id, { clones: ev.target.checked || undefined })} />
+            <span>It clones voices: send each character's voice sample (Characters → their voice) with every line, as ref_audio and ref_text</span>
+          </label>
           {test[e.id] ? <div className="small muted">{test[e.id]}</div> : null}
         </div>
       ))}
       <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
         {PRESETS.map((p) => (
           <button key={p.label} className="btn small" onClick={() =>
-              void withMacAddress(p.url).then((guess) => {
-                const url = askAddress(p.name, guess);
+              void withMacAddress(p.url).then(async (guess) => {
+                const url = await askAddress(p.name, guess);
                 if (url) save([...desk().voices.engines, { id: newId(), name: p.name, url, keyName: p.keyName, model: p.model, enabled: true }]);
               })
             }>

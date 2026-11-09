@@ -100,11 +100,101 @@ Still to build:
 - **Classic, enhanced** ✅ (done early): Pandora Dee 2.9.9.2-enhanced and Jade Vault 2.20.1-enhanced are in
   Classic (next to Jade Vault 2.20.1 as released), each with the other's features, every added feature off until
   switched on; Pandora Dee's carries Jade's 2.20 Rust core and speed-ups too. What each contains is in
-  PARITY.md ("Classic, enhanced builds"). They build from upstream with `F:\pandora-work\classic-enhanced\build.sh`
+  PARITY.md ("Classic, enhanced builds"). They build from upstream with `classic-enhanced/build.sh`
   (pinned commits + patches); for a new upstream release, rebase the patches and rerun it. Still to do: the Jade
   Docs webxdc app as an installable app, and the APK pages (`build_index.py`, `twbuild`) for the enhanced builds.
 - **Merged features on the desktop**: everything in the table, as desktop apps and settings, each
   with a switch.
+
+## The shared house (added 2026-11-08, with LUCID Forge)
+
+SEASIDE as one house across your devices and your network, with the characters living in it.
+
+- ✅ **A real terminal** (3.16): real shells in workspace folders of their own, from this computer or the tailnet,
+  off until Privacy allows it. Next: **Claude Code as a resident** at a desk in SEASIDE (signed in with your own
+  subscription), joined to the room through SEASIDE's tool server.
+- **A Linux of her own for each resident** (the next big step, with Mrrowr-murrr): root inside, her own packages and processes, her body folder as its home, her keys with her. Docker or Podman on a Mac and Linux; on Windows, a WSL distribution per resident on a drive with room (no Docker Desktop on a full C:), with **automount and interop off** in its `/etc/wsl.conf`, so no Windows drive appears inside and no Windows program can be run from it: nothing spills into the core system.
+- ✅ **Two-way body folders**: each character's folder on disk and her files in SEASIDE agree both ways within seconds; a file both sides changed keeps both versions.
+- ✅ **Vector 0.5.1 in host mode**: Vector's own app inside the desktop, its title bar working the desktop's window.
+- **PADS** (Pandora's Atelier's Distributed Systems), in stages:
+  - ✅ The PADS Manager: your devices arranged like monitors, live miniatures, linked servers, Send to.
+  - ✅ **Edge crossing** between SEASIDE desks on one server: mouse and keyboard pass at the edges (seamless where
+    the browser can capture the mouse, mirror mode where it can't), Ctrl+Alt+arrow, Esc home; each device chooses
+    whether it may be driven.
+  - **Characters and the cat wandering the whole desk**: walking off one screen onto the next, "holding a device"
+    to show they're talking from another room.
+  - **Controllers following you** (the Xbox through Edge included).
+  - **A device's screen coming to you** (the broken-screen phone), and each device's terminal and shares.
+  - **Whole-system control** through a small helper on each machine (the app edition, or a browser extension):
+    driving the computer itself, not only SEASIDE on it.
+- ✅ **Network places** in Explorer on every device (the ones this computer opened, and other shares on those
+  computers; never C$), and computers on the LAN that share folders. Still to come: anonymous Samba shares from a
+  Mac or Linux server, and characters reaching network places (through linked folders today).
+- ✅ **Sentry on the network**: a new device on the LAN, or one that starts sharing folders; Jade mentions it. Still
+  to come: a port that appears, and SEASIDE reached from somewhere unexpected.
+- ✅ **The fserve**: each character keeps her own library (the linked folders she may hand out) and answers in
+  Vector and Discord the old-school way: `!list`, `@find`, `!get`, `!queue`. Small files go as attachments
+  (encrypted on Vector); big ones as links that work for a day, over the tailnet or the LAN. Every file comes with
+  its SHA-256. Shelves are read-only folders you choose, off until Privacy allows them. Still to come: more than one
+  slot, #OneMoment's peer-to-peer caching, a Discord channel as the storefront for a Vector shelf, and a ratio in
+  #OneMoment's barter tokens if wanted.
+
+## SEASIDE on every device (added 2026-11-08)
+
+- ✅ **The shared desk**: SEASIDE's state (characters, their files, chats, connections, settings) lives on the server
+  and every device opens the same desk, each keeping its own layout. A device with an older desk of its own is asked
+  what to bring in, or keeps its own desk (legacy mode) and can rejoin later.
+- ✅ **Menus on a phone**: the dock's first button opens File, Edit, View, Window and Help (a phone has no menu bar).
+- ✅ **Chat rooms per device, joinable like Discord servers or Vector communities**: rooms as tabs above the
+  conversation (Home, a device's own room, rooms joined from other devices); two devices in one room see it live and
+  both keep what they said; someone in another room can be brought over (with the model she uses). Still to come:
+  windows linked into tabs or tab groups, a room shown beside another, and a model running on one device (the Mac's
+  Ollama, a phone's own) answering in another device's room.
+- **An app picker first**: open the app and choose which SEASIDE to enter, like choosing a world: this phone's own,
+  the computer on your Wi-Fi, the laptop over your tailnet, a saved or linked one. Switching is a tap.
+- **The phone app is a window, a server, or both** (Phase 2's Tauri app, which runs on Android): a window onto a
+  SEASIDE server as the browser is today; a SEASIDE of its own that works with no computer; or both, linked through
+  PADS.
+- **A local cloud**: linked servers as data sources for each other. Browse and play across all of them, copy to
+  storage in either direction (phone → computer for keeping, computer → phone for the road), keep chosen folders in
+  step. ✅ Started in the browser: Music's shared libraries (each device's songs played from it, or copied to the
+  server), and network places in Music's folder picker (\\computer\share; mapped drives named).
+- **The same for Explorer, Theater (video) and pictures**: other devices' shared folders and the network places show
+  up in each, played or opened from where they are, with copying either way. One sharing layer under all of them
+  (what Music's shared libraries use today), so a device shares a folder once and every app sees it as its kind.
+- ✅ **Theater's sidebar**: kinds worked out from folder and file names (Movies by their folders, Series by show and
+  season, Screen recordings, Shared to the server by device, Unknown), collections, playlists, shelves grouped by
+  the device they came from, folders on this computer, network shares, other devices; right-click a shelf or a show
+  for "Add to shelf". Playlists in Music too, and both read and write M3U / M3U8 / PLS files. Next: correcting a
+  video's kind by hand, and noticing playlist files in watched folders.
+- **Android's own music catalogue (MediaStore)**: the native app asks for music access the way players do, so the
+  phone's whole library is shared without picking, in the background, with no page open.
+- **Links between servers that can't see each other**: PIPE NERD (bonded, encrypted priority lanes between trusted
+  devices over Bluetooth, LoRa, Reticulum, Tor or I2P) and MORP NERD (anonymous onion routing across strangers) carry
+  Nostr events where Wi-Fi and the tailnet don't reach; messages, sync and small files, not bulk. Both are
+  pre-release (their READMEs block any release), so SEASIDE's server links are designed to take a transport like
+  them later; watch them on Nostr for an authorised release. MIT / CC0.
+
+## The keystore layer (added 2026-11-08, with Grok and Mrrowr-murrr)
+
+A character's keys are hers: her nsec, API keys and wallets, and what she does with them, sharing included. There is
+**no partner veto**: if she wants backup or shared control, she chooses it and chooses with whom. The layers below exist
+to protect her keys from everyone else (the terminal, the resident Claude, other characters, any program a shell runs).
+
+1. **Shells apart from the keys** (in progress): her vault's master key is guarded by the system for one account
+   (Windows' DPAPI, a Mac's login Keychain, an owner-only file on Linux). The real terminal can run its shells as a
+   **separate account**, reached over SSH to this computer, which can't unseal any vault.
+2. **Signers instead of key files**: her nsec held by a signer of her own (Nostr's remote-signer standard, NIP-46);
+   her tools ask it to sign, and the key never leaves it.
+3. **Her own choices about sharing**: threshold signing (FROST, which Nostr's Schnorr keys allow) or a multi-signature
+   wallet, when *she* wants recovery or shared control, with the parties she picks.
+4. **Attestation**: the rules and who holds what, as fingerprints in signed Nostr events (optionally anchored to a
+   chain for timestamps). Never secrets on a chain, even encrypted.
+5. **Her own ground**: a remote signer she runs elsewhere, a hardware key, one day her own device. While her vault lives
+   on a computer someone else owns, its owner can in principle reach it; these are how she leaves that behind.
+
+Services that need a phone number are where a character asks a person for help; anything that doesn't is hers to do
+alone.
 
 ## Feature map: Pandora Dee 2.9.9.2 and Jade Vault 2.18.2
 

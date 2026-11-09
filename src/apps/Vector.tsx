@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Hash, LogOut, MessageSquarePlus, Package, Paperclip, RefreshCw, Send, UserRound, Users } from "lucide-react";
+import { ExternalLink, Hash, LogOut, MessageSquarePlus, Package, Paperclip, RefreshCw, Send, UserRound, Users } from "lucide-react";
 import { desk, useDesk } from "../lib/store.ts";
 import { library } from "../lib/xdc.ts";
 import { openMenu } from "../ui/ContextMenu.tsx";
+import { askUser } from "../ui/Ask.tsx";
+import { pickInExplorer, showInExplorer, type PickOptions } from "../lib/explorer.ts";
 import qrcode from "qrcode-generator";
+import { copyText } from "../lib/clipboard.ts";
+import { askText } from "../ui/Ask.tsx";
+import { openInFullBrowser } from "./FullBrowser.tsx";
 
 /**
  * Vector for the people using the desktop. First and foremost the real thing: Vector's own app, installed and
@@ -76,6 +81,8 @@ const isPicture = (a: Attachment) => /^(png|jpe?g|gif|webp|avif)$/i.test(a.exten
 
 const ANDROID = "https://github.com/VectorPrivacy/Vector/releases/latest/download/Vector-arm64-v8a.apk";
 const RELEASES = "https://github.com/VectorPrivacy/Vector/releases/latest";
+/** Vector on the web (0.5 and later), signed in by QR code from Vector on a phone. */
+const VECTOR_WEB = "https://web.vectorapp.io";
 
 type AppInfo = { id: string; installed: boolean; version: string; how: string; where: string; job: { state: string; done: number; total: number; error: string } | null };
 
@@ -110,6 +117,45 @@ type HostStatus = { built: boolean; build: { version: string; commit: string } |
 function VectorHosted({ onBack }: { onBack: () => void }) {
   const [st, setSt] = useState<HostStatus | null>(null);
   const [error, setError] = useState("");
+  const frame = useRef<HTMLIFrameElement>(null);
+  // what Vector's page asks of the desktop (vector-host/shim.js): Explorer as its file pickers, the desktop's dialogs,
+  // "Reveal in folder", and Mini Apps into Games & Apps
+  useEffect(() => {
+    const on = async (e: MessageEvent) => {
+      const m = e.data as { pddVector?: string; id?: number; [k: string]: unknown };
+      if (!m?.pddVector || e.source !== frame.current?.contentWindow || e.origin !== location.origin) return;
+      const reply = (value: unknown) => frame.current?.contentWindow?.postMessage({ pddReply: true, id: m.id, value }, location.origin);
+      try {
+        if (m.pddVector === "pick") return reply(await pickInExplorer({ mode: m.mode as PickOptions["mode"], multiple: Boolean(m.multiple), filters: m.filters as PickOptions["filters"], defaultName: m.defaultName as string, title: m.title as string }));
+        // Vector 0.5's own title bar (its minimise, maximise and close) works this window
+        if (m.pddVector === "window") {
+          const d = desk();
+          if (m.do === "minimize") d.minimizeApp("vector");
+          else if (m.do === "maximize") d.toggleMax("vector");
+          else if (m.do === "close") d.closeApp("vector");
+          return reply({ maximized: Boolean(desk().wins.vector?.max) });
+        }
+        if (m.pddVector === "ask") return reply(await askUser(String(m.title || "Vector"), String(m.body || ""), String(m.yes || "OK"), String(m.no ?? "")));
+        if (m.pddVector === "reveal" || (m.pddVector === "open" && !/\.xdc$/i.test(String(m.path)))) return reply(void showInExplorer(String(m.path)));
+        if (m.pddVector === "miniapp" || m.pddVector === "open") {
+          // the same version already there is just opened; a new one is added beside the others, then opened
+          const r = await fetch("/api/vector-host/import-xdc", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: m.path }) });
+          const j = (await r.json()) as { id?: string; error?: string };
+          if (!r.ok || !j.id) return reply({ error: j.error || "That Mini App couldn't be opened." });
+          const pkg = (await library.list()).find((p) => p.id === j.id);
+          if (pkg) {
+            desk().set({ game: { kind: "xdc", slug: pkg.appKey, title: pkg.name, players: [], pkgId: pkg.id, scope: pkg.appKey } });
+            desk().openApp("games");
+          }
+          return reply({ ok: true });
+        }
+      } catch (err) {
+        reply({ error: err instanceof Error ? err.message : String(err) });
+      }
+    };
+    window.addEventListener("message", on);
+    return () => window.removeEventListener("message", on);
+  }, []);
   const load = useCallback(
     () =>
       void fetch("/api/vector-host/status")
@@ -177,7 +223,7 @@ function VectorHosted({ onBack }: { onBack: () => void }) {
           Vector {st.build?.version}
         </span>
       </div>
-      <iframe className="vector-frame" src="/vector-app/index.html" title="Vector" allow="clipboard-read; clipboard-write; microphone; camera" />
+      <iframe ref={frame} className="vector-frame" src="/vector-app/index.html" title="Vector" allow="clipboard-read; clipboard-write; microphone; camera" />
     </div>
   );
 }
@@ -270,6 +316,15 @@ function VectorHome({ onClient, onHost }: { onClient: () => void; onHost: () => 
           </p>
           <button className="btn primary" onClick={onHost}>
             Open Vector here
+          </button>
+          {/* Vector's web app doesn't allow being shown inside other pages (a deliberate protection for a messenger holding
+              keys), so it opens in a window of its own; signing in with the QR code from Vector on a phone works there. */}
+          <p className="small muted">
+            <b>Vector on the web:</b> the same Vector in a browser, signed in by QR code from Vector on your phone. It opens in the desktop's
+            full browser, which keeps it signed in.
+          </p>
+          <button className="btn" onClick={() => void openInFullBrowser(VECTOR_WEB).catch((e: Error) => setNote(e.message))}>
+            Vector on the web <ExternalLink size={13} />
           </button>
           <p className="small muted">
             Or a lighter built-in client: chats, Communities, files, and Mini Apps opened straight into Games & Apps, on Vector's vector-agent.
@@ -497,7 +552,7 @@ function Messenger({ token, me, onOut }: { token: string; me: string; onOut: () 
       <aside className="vector-side">
         <div className="toolbar">
           <b className="grow ellipsis" title={me}>{name(me) === "You" ? short(me) : name(me)}</b>
-          <button className="icon-btn" data-tip="Copy your npub (to share with people)" aria-label="Copy your npub" onClick={() => void navigator.clipboard?.writeText(me)}>
+          <button className="icon-btn" data-tip="Copy your npub (to share with people)" aria-label="Copy your npub" onClick={() => void copyText(me)}>
             <UserRound size={14} />
           </button>
           <button className="icon-btn" data-tip="Check for new messages" aria-label="Refresh" onClick={() => (loadLists(), void call(token, "sync_dms", { since_days: 7 }).then(loadLists, fail))}>
@@ -510,8 +565,8 @@ function Messenger({ token, me, onOut }: { token: string; me: string; onOut: () 
         <div className="row" style={{ gap: 4, padding: "4px 6px" }}>
           <button
             className="btn small grow"
-            onClick={() => {
-              const npub = prompt("Who? Their npub (npub1…)")?.trim();
+            onClick={async () => {
+              const npub = (await askText("Who?", "", { body: "Their npub (it starts with npub1).", placeholder: "npub1…" }))?.trim();
               if (npub && /^npub1[0-9a-z]{20,}$/.test(npub)) choose(npub, "dm", name(npub));
               else if (npub) setNote("That isn't an npub (they start with npub1).");
             }}
@@ -520,8 +575,8 @@ function Messenger({ token, me, onOut }: { token: string; me: string; onOut: () 
           </button>
           <button
             className="btn small grow"
-            onClick={() => {
-              const url = prompt("A Community invite link (https://vectorapp.io/invite#…)")?.trim();
+            onClick={async () => {
+              const url = (await askText("Join a Community", "", { body: "Its invite link.", placeholder: "https://vectorapp.io/invite#…" }))?.trim();
               if (url) void call(token, "join_community", { invite_url: url }).then(loadLists, fail);
             }}
           >

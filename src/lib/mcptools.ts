@@ -21,17 +21,19 @@ function exposureOf(server: McpServer, tool: string): Exposure {
   return server.exposure ?? "codemode";
 }
 
-/** Every MCP tool from connected servers, with how it's exposed. */
-export function allMcp(): McpEntry[] {
+/** Every MCP tool from connected servers, with how it's exposed; with `charId`, only what that character may use
+ *  (the desktop's shared servers, and her own from her mcp.json). */
+export function allMcp(charId?: string): McpEntry[] {
   const out: McpEntry[] = [];
   for (const { server, client } of serverClients()) {
+    if (charId !== undefined && server.owner && server.owner !== charId) continue;
     for (const tool of client.tools) out.push({ name: mcpName(server.name, tool.name), server, client, tool, exposure: exposureOf(server, tool.name) });
   }
   return out;
 }
 
 function guard(server: McpServer) {
-  if (scopeOf(server.url) !== "device" && !allowed(desk().privacy, "remote-tools")) throw new Error(blockedBecause(desk().privacy, "remote-tools"));
+  if (!server.stdio && scopeOf(server.url) !== "device" && !allowed(desk().privacy, "remote-tools")) throw new Error(blockedBecause(desk().privacy, "remote-tools"));
 }
 
 export async function callMcp(entry: McpEntry, args: Record<string, unknown>) {
@@ -89,8 +91,8 @@ self.onmessage = async (e) => {
   } catch (err) { postMessage({ op: 'done', logs, error: String(err && err.message || err) }); }
 };`;
 
-export async function runCodemode(code: string, timeoutSec = 60): Promise<string> {
-  const list = allMcp().filter((e) => e.exposure !== "hidden");
+export async function runCodemode(code: string, timeoutSec = 60, charId?: string): Promise<string> {
+  const list = allMcp(charId).filter((e) => e.exposure !== "hidden");
   const worker = new Worker(URL.createObjectURL(new Blob([WORKER], { type: "text/javascript" })));
   return new Promise((resolve) => {
     const timer = window.setTimeout(() => {
@@ -164,19 +166,32 @@ export function toMcpJson(servers: McpServer[]) {
       ...(s.toolExposure && Object.keys(s.toolExposure).length ? { toolExposure: s.toolExposure } : {}),
       ...(s.timeout ? { timeout: s.timeout } : {}),
       ...(s.description ? { description: s.description } : {}),
+      ...(s.stdio ? { ...s.stdio, url: undefined } : {}),
     };
   return JSON.stringify({ mcpServers }, null, 2);
 }
 
 export function fromMcpJson(text: string): McpServer[] {
-  const j = JSON.parse(text) as { mcpServers?: Record<string, { url?: string; headers?: Record<string, string>; enabled?: boolean; exposure?: Exposure; toolExposure?: Record<string, Exposure>; timeout?: number; description?: string; command?: string }> };
+  const j = JSON.parse(text) as {
+    mcpServers?: Record<string, { url?: string; headers?: Record<string, string>; enabled?: boolean; exposure?: Exposure; toolExposure?: Record<string, Exposure>; timeout?: number; description?: string; command?: string; args?: unknown[]; env?: Record<string, unknown>; cwd?: string }>;
+  };
   const out: McpServer[] = [];
   for (const [name, c] of Object.entries(j.mcpServers ?? {})) {
-    if (!c.url) continue; // stdio servers can't run in a web page; wrap them with supergateway
+    // a program ("command"): the desktop runs it itself (Classic needs supergateway for these)
+    const stdio = !c.url && typeof c.command === "string" && c.command.trim()
+      ? {
+          command: c.command.trim(),
+          ...(Array.isArray(c.args) && c.args.length ? { args: c.args.map(String) } : {}),
+          ...(c.env && Object.keys(c.env).length ? { env: Object.fromEntries(Object.entries(c.env).map(([k, v]) => [k, String(v)])) } : {}),
+          ...(c.cwd ? { cwd: String(c.cwd) } : {}),
+        }
+      : undefined;
+    if (!c.url && !stdio) continue;
     out.push({
       id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
       name: norm(name),
-      url: c.url,
+      url: c.url ?? "",
+      ...(stdio ? { stdio } : {}),
       keyName: "",
       enabled: c.enabled !== false,
       exposure: c.exposure ?? "codemode",
