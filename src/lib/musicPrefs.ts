@@ -13,6 +13,10 @@ export type MusicPrefs = {
   volume: number;
   shuffle: boolean;
   repeat: "off" | "all" | "one";
+  /** The queue view beside the player: the songs before, the one playing, and what comes next. */
+  showQueue?: boolean;
+  /** Songs run straight into each other: the next one waits loaded, and a song's silent last stretch is skipped. */
+  gapless?: boolean;
   /** Lower the music while a character speaks. */
   duck: boolean;
   /** When a new song starts, the character in focus may say something about it (uses the AI). */

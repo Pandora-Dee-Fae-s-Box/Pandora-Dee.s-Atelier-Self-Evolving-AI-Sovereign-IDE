@@ -42,7 +42,7 @@ Done in 3.4.0:
 - ✅ Music (3.5.0): your folders and files, internet radio, queue, visualizers (bars, scope, Milkdrop with imported
   presets), lowering under voices, a `music` tool, and songs commented on after a short listen (off by default).
   Streaming services: Spotify (Premium + a developer client ID) and Apple Music (MusicKit, Apple Developer membership)
-  can come later; YouTube by its player; Amazon Music has no web playback. Classic Milkdrop `.milk` presets need
+  can come later; YouTube by its player (✅ in the Theater, 2026-11-18); Amazon Music has no web playback. Classic Milkdrop `.milk` presets need
   converting to Butterchurn's `.json` first.
 
 - ✅ Full avatars (3.6.0): Live2D (Cubism 3/4, .zip), VRM 3D (.vrm), or an animated picture/video, uploaded and changed in a
@@ -58,11 +58,28 @@ Done in 3.4.0:
 
 Still to build:
 - ✅ Tabbed browser (3.10.0): pages through the desktop into a sandboxed frame, Reader, bookmarks, search. (moderate)
-- XDC Studio: import assets, and an asset view. (moderate)
+- XDC Studio: import assets, and an asset view. (moderate) Part-way (2026-11-18): **Make…** puts a made sound effect,
+  picture or music into an app, and **Import a web game** brings a whole game's files in. An asset view is still to come.
 - ✅ Voice (3.12.0): voice engines with OpenAI's speech API (MLX Audio on a Mac with Kokoro's voices, OpenAI, Kokoro-FastAPI, Speaches…), a voice per character, lip-sync from the audio itself, and talking instead of typing (the 🎤 button, Whisper through the same engine). (low)
 - Creating a character: more fields and help. (low)
 - A mailer between the accounts on this desktop. (low)
 - A fuller Help menu. (low)
+
+## From the Vector channels (2026-11-17), all done
+Requests and reports from Pandora Dee Fae and the house, built and pushed 2026-11-17 and 18:
+- ✅ **Theater backups** that stalled at "reconnecting": a phone that can't read a video in pieces sends it whole, with
+  progress; choosing the same file again carries on. **YouTube links** on shelves (no-cookie player, title and picture
+  kept, place remembered). **Shelf names** with any characters. What was playing comes back after a reload.
+- ✅ **Explorer**: upload progress, and **Open in…** by kind of file.
+- ✅ **Music**: back to the previous album or artist; one album per folder; gapless; `.wma`; covers kept; the queue,
+  song and second carry on after a reload.
+- ✅ **XDC Studio**: import a web game; **Make…** (sound effects, pictures, music); built-in games copied in to edit.
+- ✅ **Games**: **Imagine a game** and **Change this game…** (a character writes it as a Mini App; each change a new
+  version). Cat Club by SunkissedButterfly joins the built-in games.
+- ✅ **Classic**: Pandora Dee 2.10.7 (chats readable while a turn runs, Vector's digest mode, curiosity's thread
+  clustering and loop halt).
+- Next, with ISLANDS: more than one conversation running at once, and Pandora's `pandora-multi` tool (a stdio server
+  that ships with SEASIDE).
 
 ## Phase 2: the native app
 

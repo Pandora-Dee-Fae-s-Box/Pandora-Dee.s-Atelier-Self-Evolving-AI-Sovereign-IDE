@@ -111,7 +111,8 @@ export type ToolSpec = { name: string; description: string; parameters: Record<s
 
 /** `thinking`: what a reasoning model sent as its reasoning (apart from the reply). */
 /** What a call cost: the server's own counts when it reports them, else an estimate (four characters a token). */
-export type CallUsage = { prompt: number; output: number; ms: number; estimated: boolean; limits?: Record<string, string> };
+/** `pace` (Ollama only): how long the computer spent loading the model, reading the prompt and writing the answer. */
+export type CallUsage = { prompt: number; output: number; ms: number; estimated: boolean; limits?: Record<string, string>; pace?: { loadMs: number; readMs: number; writeMs: number } };
 export type StreamResult = { text: string; toolCalls: ToolCall[]; thinking: string; usage?: CallUsage };
 
 /** The rate-limit headers a provider sends (OpenAI, Groq, OpenRouter and others), so a character can see her limits coming. */
@@ -152,6 +153,67 @@ async function failure(res: Response, what: string) {
 }
 
 const aicordIds = new Map<string, string>();
+
+/** One quick answer for a decision (decideCore.ts): a single token, with the scores of the likeliest first tokens when
+ *  the server shows them (local Ollama and OpenAI-style servers that support logprobs; cloud models often don't). */
+export async function decideOnce(c: Connection, key: string, model: string, system: string, user: string, signal?: AbortSignal): Promise<{ text: string; top: { token: string; logprob: number }[] }> {
+  const messages = [
+    { role: "system", content: system },
+    { role: "user", content: user },
+  ];
+  const ollama = c.kind === "ollama";
+  const url = ollama ? `${base(c.baseUrl)}/api/chat` : `${base(c.baseUrl)}/chat/completions`;
+  const body = ollama
+    ? { model, messages, stream: false, think: false, logprobs: true, top_logprobs: 20, options: { temperature: 0, num_predict: 1 } }
+    : { model, messages, stream: false, temperature: 0, max_tokens: 1, logprobs: true, top_logprobs: 20 };
+  const res = await outbound(url, { method: "POST", headers: authHeaders(c.kind, key), body: JSON.stringify(body), signal }, c.via);
+  if (!res.ok) throw await failure(res, c.label);
+  const j = (await res.json()) as {
+    message?: { content?: string };
+    logprobs?: { top_logprobs?: { token: string; logprob: number }[] }[];
+    choices?: { message?: { content?: string }; logprobs?: { content?: { top_logprobs?: { token: string; logprob: number }[] }[] } }[];
+  };
+  if (ollama) return { text: j.message?.content ?? "", top: j.logprobs?.[0]?.top_logprobs ?? [] };
+  const ch = j.choices?.[0];
+  return { text: ch?.message?.content ?? "", top: ch?.logprobs?.content?.[0]?.top_logprobs ?? [] };
+}
+
+/** The window a model is loaded with right now (Ollama's /api/ps), which can be smaller than what its file allows:
+ *  Ollama loads models with its own context length (OLLAMA_CONTEXT_LENGTH or its default), not the model's maximum. */
+export async function loadedWindow(c: Connection, key: string, model: string): Promise<number | null> {
+  if (c.kind !== "ollama") return null;
+  try {
+    const res = await outbound(`${base(c.baseUrl)}/api/ps`, { headers: authHeaders(c.kind, key) }, c.via);
+    if (!res.ok) return null;
+    const list = ((await res.json()) as { models?: { name?: string; model?: string; context_length?: number }[] }).models ?? [];
+    const m = list.find((x) => x.name === model || x.model === model);
+    return m && typeof m.context_length === "number" && m.context_length > 0 ? m.context_length : null;
+  } catch {
+    return null;
+  }
+}
+
+const windows = new Map<string, number | null>();
+/** How many tokens a model's context holds, as its server says (Ollama's /api/show), or null when it won't say. */
+export async function modelWindow(c: Connection, key: string, model: string): Promise<number | null> {
+  const k = `${c.id}:${model}`;
+  if (windows.has(k)) return windows.get(k) ?? null;
+  let n: number | null = null;
+  if (c.kind === "ollama") {
+    try {
+      const res = await outbound(`${base(c.baseUrl)}/api/show`, { method: "POST", headers: authHeaders(c.kind, key), body: JSON.stringify({ model }) }, c.via);
+      if (res.ok) {
+        const info = ((await res.json()) as { model_info?: Record<string, unknown> }).model_info ?? {};
+        const found = Object.entries(info).find(([name, v]) => /\.context_length$/.test(name) && typeof v === "number");
+        n = found ? (found[1] as number) : null;
+      }
+    } catch {
+      n = null;
+    }
+  }
+  windows.set(k, n);
+  return n;
+}
 
 export async function listModels(c: Connection, key: string, signal?: AbortSignal): Promise<string[]> {
   if (c.kind === "ollama") {
@@ -276,6 +338,36 @@ export function textToolCalls(text: string, names: string[]): { calls: { name: s
       return all;
     }
   });
+  // a call written out as {"name": …, "arguments": …}, in a code block or on a line of its own (as a guide shows it):
+  // GLM copies the example's shape exactly
+  const callsIn = (body: string) => {
+    const before = calls.length;
+    try {
+      if (asCall(JSON.parse(body))) return true;
+    } catch {
+      /* one call per line, perhaps */
+    }
+    const lines = body.split("\n").filter((l) => l.trim());
+    const parsed = lines.map((l) => {
+      try {
+        return JSON.parse(l) as unknown;
+      } catch {
+        return null;
+      }
+    });
+    const named = (j: unknown) => {
+      const o = j as { name?: unknown } | null;
+      return Boolean(o && typeof o.name === "string" && known.has(o.name));
+    };
+    if (!parsed.length || !parsed.every(named)) return false;
+    parsed.forEach(asCall);
+    return calls.length > before;
+  };
+  rest = rest.replace(/```(?:json)?[ \t]*\n?([\s\S]*?)```/g, (all, body: string) => (callsIn(body.trim()) ? "" : all));
+  rest = rest
+    .split("\n")
+    .filter((l) => !(/^\s*\{\s*"name"\s*:/.test(l) && callsIn(l.trim())))
+    .join("\n");
   // a bare JSON call, the whole reply
   if (!calls.length && /^\s*\{[\s\S]*\}\s*$/.test(rest)) {
     try {
@@ -289,11 +381,22 @@ export function textToolCalls(text: string, names: string[]): { calls: { name: s
     const lines = rest.split("\n");
     const kept: string[] = [];
     for (let i = 0; i < lines.length; i++) {
-      const name = lines[i].trim();
+      // the name on a line of its own, or (GLM again) glued to the end of a sentence: "…from the centre.app_send_update",
+      // with the JSON starting on the next line; the sentence stays said
+      let name = lines[i].trim();
+      let said = "";
+      if (!known.has(name) && /^\s*[{[]/.test(lines[i + 1] ?? "")) {
+        const glued = [...known].find((n) => name.endsWith(n) && /[^\w]$/.test(name.slice(0, -n.length)));
+        if (glued) {
+          said = name.slice(0, -glued.length).trim();
+          name = glued;
+        }
+      }
       if (known.has(name)) {
         let j = i + 1;
         let body = "";
         let args: Record<string, unknown> | null = null;
+        let after = "";
         for (; j < lines.length && j < i + 40; j++) {
           body += `${lines[j]}\n`;
           try {
@@ -303,11 +406,19 @@ export function textToolCalls(text: string, names: string[]): { calls: { name: s
               break;
             }
           } catch {
-            /* the arguments go on */
+            // GLM sometimes carries on talking on the JSON's last line: `{"type": "bed"} Time to move on!`
+            const lead = leadingJson(body);
+            if (lead) {
+              args = lead.value;
+              after = lead.after.trim();
+              break;
+            }
           }
         }
         if (args) {
           calls.push({ name, args });
+          if (said) kept.push(said);
+          if (after) kept.push(after);
           i = j;
           continue;
         }
@@ -317,6 +428,31 @@ export function textToolCalls(text: string, names: string[]): { calls: { name: s
     if (calls.length) rest = kept.join("\n");
   }
   return { calls, rest: rest.trim() };
+}
+
+/** A JSON object at the start of a text, followed by anything else: the object and what comes after it. */
+function leadingJson(text: string): { value: Record<string, unknown>; after: string } | null {
+  const start = text.search(/\S/);
+  if (start < 0 || text[start] !== "{") return null;
+  let depth = 0;
+  let inString = false;
+  for (let k = start; k < text.length; k++) {
+    const ch = text[k];
+    if (inString) {
+      if (ch === "\\") k++;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}" && --depth === 0) {
+      try {
+        const v = JSON.parse(text.slice(start, k + 1)) as unknown;
+        return v && typeof v === "object" && !Array.isArray(v) ? { value: v as Record<string, unknown>, after: text.slice(k + 1) } : null;
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
 }
 
 function parseArgs(raw: unknown): Record<string, unknown> {
@@ -400,6 +536,7 @@ export async function streamOnce(
   const partial = new Map<number, { id: string; name: string; args: string }>();
   let thinking = "";
   let counted: { prompt: number; output: number } | null = null;
+  let pace: CallUsage["pace"] | undefined;
   const think = (piece: string | undefined | null) => {
     if (!piece) return;
     thinking += piece;
@@ -427,9 +564,16 @@ export async function streamOnce(
           done?: boolean;
           prompt_eval_count?: number;
           eval_count?: number;
+          load_duration?: number;
+          prompt_eval_duration?: number;
+          eval_duration?: number;
         };
         if (row.error) throw new Error(row.error);
-        if (row.done && (row.prompt_eval_count || row.eval_count)) counted = { prompt: row.prompt_eval_count ?? 0, output: row.eval_count ?? 0 };
+        if (row.done && (row.prompt_eval_count || row.eval_count)) {
+          counted = { prompt: row.prompt_eval_count ?? 0, output: row.eval_count ?? 0 };
+          // (nanoseconds; a cloud model through Ollama reports none)
+          if (row.prompt_eval_duration || row.eval_duration) pace = { loadMs: Math.round((row.load_duration ?? 0) / 1e6), readMs: Math.round((row.prompt_eval_duration ?? 0) / 1e6), writeMs: Math.round((row.eval_duration ?? 0) / 1e6) };
+        }
         think(row.message?.thinking);
         take(row.message?.content);
         for (const tc of row.message?.tool_calls ?? []) {
@@ -464,7 +608,7 @@ export async function streamOnce(
     if (p.name) calls.push({ id: p.id || newCallId(), name: p.name, args: parseArgs(p.args) });
   }
   const usage: CallUsage = counted
-    ? { ...counted, ms: Date.now() - started, estimated: false, limits: limitHeaders(res.headers) }
+    ? { ...counted, ms: Date.now() - started, estimated: false, limits: limitHeaders(res.headers), ...(pace ? { pace } : {}) }
     : {
         prompt: Math.ceil((JSON.stringify(turns).length + JSON.stringify(toolDefs).length) / 4),
         output: Math.ceil((text.length + thinking.length + JSON.stringify(calls).length) / 4),

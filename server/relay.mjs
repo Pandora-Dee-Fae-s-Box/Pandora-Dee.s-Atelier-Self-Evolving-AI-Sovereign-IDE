@@ -33,7 +33,31 @@ function fail(res, message, code = 502) {
   res.end(JSON.stringify({ error: message }));
 }
 
-/** job: { url, method, headers, body (text), bodyB64, via: "node" | "curl" | "python", timeout (seconds) }
+/** This computer, the home network or a tailnet (the same rule as the page's lib/netGuard.ts). */
+export function isPrivateHost(host) {
+  const h = String(host || "").toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (!h) return true;
+  const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(h);
+  if (v4) {
+    const a = Number(v4[1]), b = Number(v4[2]);
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (h.includes(":")) return h === "::" || h === "::1" || /^f[cd]/.test(h) || /^fe[89ab]/.test(h) || h.startsWith("::ffff:");
+  if (!h.includes(".")) return true;
+  return /(^|\.)(localhost|local|lan|home|home\.arpa|internal|intranet|corp|ts\.net)$/.test(h);
+}
+
+/** Why a hop of a character's own request may not go (a local address not listed), or "". */
+export function localRefusal(at, local) {
+  const host = at.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (!isPrivateHost(host)) return "";
+  const withPort = at.port ? `${host}:${at.port}` : host;
+  const ok = String(local).split(/[\s,]+/).map((x) => x.trim().toLowerCase()).filter(Boolean).some((p) => (p.startsWith("*.") ? host.endsWith(p.slice(1)) || host === p.slice(2) : p === host || p === withPort));
+  return ok ? "" : `${host} is on this computer or the local network, which a character's request doesn't reach unless it's listed in Connections → Web → Local addresses.`;
+}
+
+/** job: { url, method, headers, body (text), bodyB64, via: "node" | "curl" | "python", timeout (seconds),
+ *        noRedirect (a key is in it: redirects come back as they are), hopGuard: { local } (a character's own request) }
  *  guard: for requests from outside the desktop's page (paired Classic): async (url) → why it's refused, or "".
  *  Then the request goes with Node and redirects are followed here, each one checked by the guard. */
 export async function relay(req, res, job, guard = null) {
@@ -50,7 +74,11 @@ export async function relay(req, res, job, guard = null) {
   if (!Object.keys(headers).some((k) => k.toLowerCase() === "user-agent")) headers["User-Agent"] = "PandoraDeeDesktop/3.10 (+https://github.com/AETHER-ENGINEERS/pandora-dee)";
   const body = job.bodyB64 ? Buffer.from(job.bodyB64, "base64") : job.body != null && method !== "GET" && method !== "HEAD" ? Buffer.from(String(job.body)) : undefined;
   const timeout = Math.min(3600, Math.max(1, Number(job.timeout) || 300)); // up to an hour: songs can take a long time
-  const via = guard ? "node" : job.via === "curl" || job.via === "python" ? job.via : "node";
+  // a character's own request (http_request, reading a page): every redirect hop checked against the local network
+  if (!guard && job.hopGuard) guard = async (at) => localRefusal(at, String(job.hopGuard.local || ""));
+  // a key in the request: no redirects at all (the redirect itself comes back, with where it leads)
+  const noRedirect = Boolean(job.noRedirect);
+  const via = guard || noRedirect ? "node" : job.via === "curl" || job.via === "python" ? job.via : "node";
   const ctrl = new AbortController();
   const stop = () => ctrl.abort();
   req.on("close", stop);
@@ -68,14 +96,14 @@ export async function relay(req, res, job, guard = null) {
           if (why) return fail(res, why, 403);
           r = await fetch(at, { method: m, headers, body: b, signal: ctrl.signal, redirect: "manual" });
           const next = r.status >= 300 && r.status < 400 && r.headers.get("location");
-          if (!next) break;
+          if (!next || noRedirect) break;
           if (hop >= 10) return fail(res, "Too many redirects.", 502);
           at = new URL(next, at);
           if (at.protocol !== "http:" && at.protocol !== "https:") return fail(res, "A redirect led to something that isn't a web address.", 400);
           // as browsers do: 303 (and 301/302 after POST) become GET without a body
           if (r.status === 303 || ((r.status === 301 || r.status === 302) && m === "POST")) (m = "GET"), (b = undefined);
         }
-      } else r = await fetch(url, { method, headers, body, signal: ctrl.signal, redirect: "follow" });
+      } else r = await fetch(url, { method, headers, body, signal: ctrl.signal, redirect: noRedirect ? "manual" : "follow" });
       begin(res, r.status, Object.fromEntries(r.headers));
       if (r.body) Readable.fromWeb(r.body).on("error", () => res.end()).pipe(res);
       else res.end();

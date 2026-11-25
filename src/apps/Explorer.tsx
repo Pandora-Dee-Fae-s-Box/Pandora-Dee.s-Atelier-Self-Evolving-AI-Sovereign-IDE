@@ -4,6 +4,8 @@ import {
   ArrowLeft, ChevronLeft, ChevronRight, Copy, Download, ExternalLink, File as FileIcon, FileText, Folder, FolderPlus, FolderUp, Gamepad2, HardDrive, Image as ImageIcon,
   LayoutGrid, LayoutList, Link2, Link2Off, Monitor, RefreshCw, Music2, Network, PackageOpen, RotateCcw, Share2, Smartphone, Trash2, Upload, Video,
 } from "lucide-react";
+import { Film, ListPlus, Music as MusicIcon } from "lucide-react";
+import { openInMusic, openInTab, openInTheater } from "../lib/openIn.ts";
 import { desk } from "../lib/store.ts";
 import { Markdown } from "../ui/common.tsx";
 import { openMenu, openMenuAt, type MenuItem } from "../ui/ContextMenu.tsx";
@@ -75,6 +77,7 @@ function FileBrowser({ mode, go, pick }: { mode: Mode; go?: { path: string; at: 
   const [view, setView] = useState<"list" | "grid">(() => (localStorage.getItem("pdd-explorer-view") === "grid" ? "grid" : "list"));
   const [saveName, setSaveName] = useState(pick?.defaultName ?? "");
   const [dropping, setDropping] = useState(false);
+  const [uploading, setUploading] = useState<{ name: string; i: number; n: number; sent: number; total: number } | null>(null);
   // pictures: only them (and folders) in the list, and one at a time across the whole window
   const [picsOnly, setPicsOnly] = useState(() => localStorage.getItem("pdd-explorer-pics") === "1");
   const [viewing, setViewing] = useState<string | null>(null);
@@ -268,13 +271,21 @@ function FileBrowser({ mode, go, pick }: { mode: Mode; go?: { path: string; at: 
   const newFolder = () => setEditing({ path: "", value: "New folder" });
   const upload = async (files: File[]) => {
     if (!files.length || !cwd) return;
+    const total = files.reduce((n, f) => n + f.size, 0);
+    let before = 0;
     try {
       let last = "";
-      for (const f of files) last = await fileApi.upload(cwd, f);
+      for (const [i, f] of files.entries()) {
+        setUploading({ name: f.name, i, n: files.length, sent: before, total });
+        last = await fileApi.upload(cwd, f, (sent) => setUploading({ name: f.name, i, n: files.length, sent: before + Math.min(sent, f.size), total }));
+        before += f.size;
+      }
       await open(cwd, baseName(last), false);
       desk().say(`${files.length === 1 ? files[0].name : `${files.length} files`} uploaded here.`);
     } catch (err) {
       fail(err);
+    } finally {
+      setUploading(null);
     }
   };
 
@@ -284,6 +295,7 @@ function FileBrowser({ mode, go, pick }: { mode: Mode; go?: { path: string; at: 
     const k = kindOf(e);
     return [
       ...(!many ? [{ label: e.dir ? "Open" : k === "xdc" ? "Open in Games & Apps" : "Preview", run: () => (k === "xdc" || e.dir ? activate(e) : setSel([e.path])) }] : []),
+      ...(!many && !e.dir && mode === "browse" ? openInItems(e, k) : []),
       ...(!many && !e.dir ? [{ label: "Download to this device", icon: <Download size={14} />, run: () => downloadToDevice(e.path) }] : []),
       ...(!many && e.ext === "zip" && !e.path.startsWith("device:") ? [{ label: "Unpack here", icon: <PackageOpen size={14} />, hint: "into a new folder", run: () => void unpack(e) }] : []),
       { sep: true },
@@ -457,6 +469,17 @@ function FileBrowser({ mode, go, pick }: { mode: Mode; go?: { path: string; at: 
         void upload([...ev.dataTransfer.files]);
       }}
     >
+      {uploading ? (
+        <div className="explorer-uploading" role="status">
+          <span className="small">
+            Uploading {uploading.n > 1 ? `${uploading.i + 1} of ${uploading.n}: ` : ""}
+            <b>{uploading.name}</b> · {sizeOf(uploading.sent)} of {sizeOf(uploading.total)} ({uploading.total ? Math.floor((uploading.sent / uploading.total) * 100) : 0}%)
+          </span>
+          <div className="theater-bar-total">
+            <span style={{ width: `${uploading.total ? (uploading.sent / uploading.total) * 100 : 0}%` }} />
+          </div>
+        </div>
+      ) : null}
       {error ? <p className="danger-text" style={{ padding: 12 }}>{error}</p> : null}
       {!error && !entries.length ? <p className="muted" style={{ padding: 12 }}>Nothing here{filterExts ? " of the kinds asked for" : ""}. Drop files here to upload them.</p> : null}
       {editing && !editing.path ? (
@@ -789,4 +812,20 @@ function Computers({ cwd, known, onOpen }: { cwd: string; known: string[]; onOpe
       </button>
     </>
   );
+}
+
+/** "Open in…": the apps made for this kind of file, and a new tab for anything this device's browser can show. */
+function openInItems(e: Entry, k: string): MenuItem[] {
+  const audio = k === "audio" || e.ext === "wma";
+  const items: MenuItem[] = [];
+  if (audio) {
+    items.push(
+      { label: "Music", icon: <MusicIcon size={14} />, hint: "play it now", run: () => void openInMusic(e.path) },
+      { label: "Music: play next", icon: <ListPlus size={14} />, run: () => void openInMusic(e.path, "next") },
+      { label: "Music: add to the queue", icon: <ListPlus size={14} />, run: () => void openInMusic(e.path, "queue") },
+    );
+  }
+  if (k === "video") items.push({ label: "Theatre", icon: <Film size={14} />, run: () => openInTheater(e.path) });
+  items.push({ label: "A new tab", icon: <ExternalLink size={14} />, hint: k === "pdf" || k === "image" || k === "text" || audio || k === "video" ? "in this device's browser" : "it may download instead", run: () => openInTab(e.path) });
+  return [{ heading: "Open in…" }, ...items, { sep: true }];
 }

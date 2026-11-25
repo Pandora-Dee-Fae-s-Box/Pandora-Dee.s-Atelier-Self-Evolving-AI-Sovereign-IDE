@@ -189,6 +189,15 @@ export function createLibrary(dataDir) {
     fs.appendFileSync(scopeFile(scope), `${JSON.stringify(row)}\n`);
     return row;
   }
+  /** A row as another server numbered it (a linked game's host): kept with its own serial, only as the next one. */
+  function appendExact(scope, row) {
+    const last = readUpdates(scope).at(-1)?.serial ?? 0;
+    if (row.serial !== last + 1) return false;
+    const { serial, at, from, name, update, descr } = row;
+    fs.appendFileSync(scopeFile(scope), `${JSON.stringify({ from, name, update, ...(descr ? { descr } : {}), serial, at: at || Date.now() })}
+`);
+    return true;
+  }
   function clearUpdates(scope) {
     fs.rmSync(scopeFile(scope), { force: true });
   }
@@ -198,6 +207,7 @@ export function createLibrary(dataDir) {
     list: () => pkgs,
     get: (id) => pkgs.find((p) => p.id === id),
     importAny,
+    importXdc,
     remove,
     update,
     fork,
@@ -206,6 +216,7 @@ export function createLibrary(dataDir) {
     exportZip,
     readUpdates,
     appendUpdate,
+    appendExact,
     clearUpdates,
     save,
   };

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Maximize2, Wallpaper } from "lucide-react";
-import { audioGraph, useMusic } from "../lib/music.ts";
+import { audioGraph, current, useMusic } from "../lib/music.ts";
 import { desk, useDesk } from "../lib/store.ts";
 
 type Preset = Record<string, unknown>;
@@ -62,10 +62,50 @@ export async function importPresets(files: File[]) {
 export function Visualizer({ big = false }: { big?: boolean }) {
   const mode = useDesk((s) => s.music.viz);
   const preset = useDesk((s) => s.music.preset);
-  const cycle = useDesk((s) => s.music.cycle);
+  // The sound chain exists from the first play on; the picture is set up once it does, and then stays up through
+  // pauses and the gaps between songs (setting Milkdrop up again each time is a visible hitch).
   const playing = useMusic((s) => s.playing);
+  const live = playing || Boolean(audioGraph().analyser);
   const canvas = useRef<HTMLCanvasElement>(null);
   const [note, setNote] = useState("");
+  // Milkdrop's own keys (as in MilkDrop): next and previous preset, hold, and what's showing
+  const ctl = useRef<{ next: (hard?: boolean) => void; prev: () => void } | null>(null);
+  const [overlay, setOverlay] = useState<{ text: string; help?: boolean } | null>(null);
+  const overlayTimer = useRef(0);
+  const show = (text: string, help = false) => {
+    window.clearTimeout(overlayTimer.current);
+    setOverlay({ text, help });
+    if (!help) overlayTimer.current = window.setTimeout(() => setOverlay(null), 3500);
+  };
+  const clock = (t: number) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+  const onKey = (e: React.KeyboardEvent) => {
+    const k = e.key;
+    const it = current();
+    const said = (() => {
+      if (k === "F1" || k === "?") return (overlay?.help ? (setOverlay(null), "") : (show(HELP, true), "")), true;
+      if (k === "F2" || k === "t" || k === "T") return show(it ? (it.kind === "track" ? `${it.title}${it.artist ? ` · ${it.artist}` : ""}` : it.name) : "Nothing playing"), true;
+      if (k === "F3") {
+        const { position, duration } = useMusic.getState();
+        return show(duration ? `${clock(position)} of ${clock(duration)}` : clock(position)), true;
+      }
+      if (k === "F4" || k === "i" || k === "I") return show(note || "No preset yet"), true;
+      if (mode !== "milkdrop") return false;
+      if (k === " " || k === "ArrowRight") return ctl.current?.next(), true;
+      if (k === "h" || k === "H") return ctl.current?.next(true), true;
+      if (k === "Backspace" || k === "ArrowLeft") return ctl.current?.prev(), true;
+      if (k === "ScrollLock" || k === "r" || k === "R") {
+        const hold = desk().music.cycle;
+        desk().set({ music: { ...desk().music, cycle: !hold } });
+        return show(hold ? "Preset held" : "A new preset every 25 s"), true;
+      }
+      if (k === "Escape" && overlay?.help) return setOverlay(null), true;
+      return false;
+    })();
+    if (said) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
 
   useEffect(() => {
     const cv = canvas.current;
@@ -99,15 +139,30 @@ export function Visualizer({ big = false }: { big?: boolean }) {
           viz = lib.createVisualizer(ctx, cv, { width: size.w, height: size.h, pixelRatio: 1 });
           viz.connectAudio(source);
           const names = Object.keys(presets);
-          const pick = (name: string) => {
+          const seen: string[] = [];
+          let at = -1;
+          const pick = (name: string, blend = 2.0, remember = true) => {
             const p = presets[name];
             if (!p || !viz) return;
-            viz.loadPreset(p, 2.0);
+            if (remember) {
+              seen.splice(at + 1);
+              seen.push(name);
+              if (seen.length > 50) seen.shift();
+              at = seen.length - 1;
+            }
+            viz.loadPreset(p, blend);
             setNote(name);
             if (desk().music.preset !== name) desk().set({ music: { ...desk().music, preset: name } });
           };
           pick(preset && presets[preset] ? preset : names[Math.floor(Math.random() * names.length)]);
-          if (cycle) cycleTimer = window.setInterval(() => pick(names[Math.floor(Math.random() * names.length)]), 25_000);
+          const random = () => names[Math.floor(Math.random() * names.length)];
+          cycleTimer = window.setInterval(() => desk().music.cycle && pick(random()), 25_000);
+          ctl.current = {
+            next: (hard = false) => pick(random(), hard ? 0 : 2.0),
+            prev: () => {
+              if (at > 0) pick(seen[--at], 2.0, false);
+            },
+          };
           const loop = () => {
             if (stopped) return;
             viz?.render();
@@ -125,6 +180,7 @@ export function Visualizer({ big = false }: { big?: boolean }) {
       ro.observe(cv);
       return () => {
         stopped = true;
+        ctl.current = null;
         cancelAnimationFrame(raf);
         window.clearInterval(cycleTimer);
         ro.disconnect();
@@ -181,18 +237,28 @@ export function Visualizer({ big = false }: { big?: boolean }) {
       cancelAnimationFrame(raf);
       ro.disconnect();
     };
-  }, [mode, cycle, playing]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mode, live]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (mode === "off") return null;
   return (
-    <div className={`visualizer${big ? " big" : ""}`}>
+    <div className={`visualizer${big ? " big" : ""}`} tabIndex={big ? 0 : undefined} onKeyDown={big ? onKey : undefined} title={big ? "Click, then F1 for its keys" : undefined}>
       {/* a fresh canvas per mode: one that drew in 2D can't be used for WebGL */}
       <canvas key={mode} ref={canvas} aria-label={`Visualizer: ${mode}`} />
       {!audioGraph().analyser ? <div className="viz-wait small faint">Starts with the music.</div> : null}
       {mode === "milkdrop" && note ? <div className="viz-note small">{note}</div> : null}
+      {overlay ? <div className={`viz-overlay${overlay.help ? " help" : ""}`}>{overlay.text}</div> : null}
     </div>
   );
 }
+
+const HELP = [
+  "Milkdrop's keys",
+  "Space or →   next preset        H   hard cut to a new one",
+  "Backspace or ←   previous preset",
+  "Scroll Lock or R   hold the preset (or cycle again)",
+  "F2 or T   song title     F3   song time     F4 or I   preset name",
+  "F1, ? or Esc   close this",
+].join("\n");
 
 /** The visualizer in its own window: resize it, make it full screen, or put it behind everything. */
 export function VisualizerApp() {

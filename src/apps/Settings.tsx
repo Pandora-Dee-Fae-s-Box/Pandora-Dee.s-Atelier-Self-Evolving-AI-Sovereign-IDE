@@ -8,6 +8,7 @@ import { EngineVoicePicker, ListeningSettings, VoiceEnginesEditor } from "../ui/
 import { remoteFor } from "../lib/prefs.ts";
 import { Num } from "../ui/Num.tsx";
 import { useEffect, useRef, useState } from "react";
+import { ownName, setMyName } from "../lib/myName.ts";
 import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { CAT_COATS, desk, uid, useDesk, type Account, type Cat } from "../lib/store.ts";
 import { credential, listModels, explainError, pickModel, PRESETS, sampleRequest, scopeOf, SCOPE_LABEL, type Connection } from "../lib/model.ts";
@@ -431,11 +432,36 @@ function AiSection() {
   );
 }
 
+/** Who "you" are on this device: shown in the room and games, and told to the characters (lib/myName.ts). */
+function MyNameField() {
+  const session = useDesk((s) => s.session);
+  const [name, setName] = useState(() => ownName());
+  return (
+    <label className="field" style={{ maxWidth: 380 }}>
+      <span>Your name on this device</span>
+      <input
+        className="input"
+        value={name}
+        maxLength={40}
+        placeholder={session ? `${session} (your account's name)` : "You"}
+        onChange={(e) => setName(e.target.value)}
+        onBlur={() => setMyName(name)}
+        onKeyDown={(e) => e.key === "Enter" && setMyName(name)}
+      />
+      <span className="small muted">
+        Shown instead of "You" in the room and in games, and how the characters know who's talking. Each device keeps
+        its own, so several people sharing this SEASIDE are told apart. Empty: {session ? "your account's name" : '"You"'}.
+      </span>
+    </label>
+  );
+}
+
 function LookSection() {
   const s = useDesk();
   return (
     <>
       <h2>Look</h2>
+      <MyNameField />
       <label className="field" style={{ maxWidth: 380 }}>
         <span>Text size (px)</span>
         <Num min={12} max={22} value={s.fontSize} onChange={(n) => desk().set({ fontSize: n })} />

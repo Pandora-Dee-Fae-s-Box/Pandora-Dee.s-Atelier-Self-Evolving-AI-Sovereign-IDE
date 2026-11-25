@@ -112,21 +112,40 @@ agent() {
   fi
   launchctl bootout "gui/$ID/$label" 2>/dev/null || true
   launchctl bootout "user/$ID/$label" 2>/dev/null || true
-  # your login session when this runs at the Mac; the background domain when it runs over SSH
-  if launchctl bootstrap "gui/$ID" "$AGENTS/$label.plist" 2>/dev/null; then
-    echo "Started $label (log: $log)"
-  elif launchctl bootstrap "user/$ID" "$AGENTS/$label.plist"; then
-    echo "Started $label in the background domain, since this is an SSH session (log: $log)"
-  else
-    echo "launchd wouldn't start $label. Running this script once in Terminal at the Mac itself usually works."
-    exit 1
+  # stopping finishes in the background: starting again before it has lets go fails with
+  # "Bootstrap failed: 5: Input/output error", so wait (up to 10 s) until launchd no longer has it
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -z "$(where "$label")" ] && break
+    sleep 1
+  done
+  # your login session when this runs at the Mac; the background domain when it runs over SSH; one more try of
+  # each after a moment, in case launchd was still busy letting the old one go
+  for attempt in 1 2; do
+    if launchctl bootstrap "gui/$ID" "$AGENTS/$label.plist" 2>/dev/null; then
+      echo "Started $label (log: $log)"
+      return 0
+    elif launchctl bootstrap "user/$ID" "$AGENTS/$label.plist" 2>/dev/null; then
+      echo "Started $label in the background domain, since this is an SSH session (log: $log)"
+      return 0
+    fi
+    sleep 3
+  done
+  # still loaded from before (the stop didn't take): restart what's there, which runs the newly written settings
+  dom=$(where "$label")
+  if [ -n "$dom" ] && launchctl kickstart -k "$dom/$label" 2>/dev/null; then
+    echo "Restarted $label (log: $log)"
+    return 0
   fi
+  echo "launchd wouldn't start $label. Running this script once in Terminal at the Mac itself usually works."
+  return 1
 }
+FAILED=0
 
 # MLX Audio's server may live in another environment (one with its server parts): PDD_AUDIO_PYTHON
 AUDIO_PY="${PDD_AUDIO_PYTHON-$PY}"
 if [ -n "$AUDIO_PY" ] && "$AUDIO_PY" -c "import mlx_audio, uvicorn" 2>/dev/null; then
-  agent org.pandoradee.mlx-audio "$AUDIO_PY" -m mlx_audio.server --host 0.0.0.0 --port "$AUDIO_PORT"
+  # (if this one won't start, the music bridge is still set up below)
+  agent org.pandoradee.mlx-audio "$AUDIO_PY" -m mlx_audio.server --host 0.0.0.0 --port "$AUDIO_PORT" || FAILED=1
 else
   unload org.pandoradee.mlx-audio
   echo "MLX Audio's server (voices) isn't set up: no Python here has its server parts (uvicorn). Songs are unaffected."
@@ -134,9 +153,9 @@ fi
 
 if [ -f "$BRIDGE" ]; then
   if [ -n "$MUSIC_MODEL" ]; then
-    agent org.pandoradee.music-bridge "$PY" "$BRIDGE" --port "$MUSIC_PORT" --model "$MUSIC_MODEL"
+    agent org.pandoradee.music-bridge "$PY" "$BRIDGE" --port "$MUSIC_PORT" --model "$MUSIC_MODEL" || FAILED=1
   else
-    agent org.pandoradee.music-bridge "$PY" "$BRIDGE" --port "$MUSIC_PORT"
+    agent org.pandoradee.music-bridge "$PY" "$BRIDGE" --port "$MUSIC_PORT" || FAILED=1
   fi
 else
   echo "(mlx-music-bridge.py isn't next to this script, so the music bridge wasn't set up.)"
@@ -147,3 +166,4 @@ echo
 echo "MLX Audio:    http://$(ipconfig getifaddr en0 2>/dev/null || echo this-mac):$AUDIO_PORT   (voices, listening)"
 echo "Music bridge: http://$(ipconfig getifaddr en0 2>/dev/null || echo this-mac):$MUSIC_PORT   (songs)"
 echo "Check on them any time:  bash $0 --status"
+exit $FAILED

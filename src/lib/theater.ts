@@ -1,12 +1,15 @@
-// Media Theater's side of the desktop: the video library (server/theater.mjs), backing videos up from a phone in
+// Media Theatre's side of the desktop: the video library (server/theater.mjs), backing videos up from a phone in
 // checked pieces that carry on after a dropped connection, thumbnails made by whichever page can play the video,
 // and where each video was left off (kept per device).
 
 import { useSyncExternalStore } from "react";
+import type { QueueWhere } from "./queueOps.ts";
 import { rawUrl } from "./explorer.ts";
 import { deviceName } from "./devshare.ts";
+import { sendPieces, wholeUpload } from "./uploadCore.ts";
 
-export type Video = { id: string; path: string; name: string; ext: string; shelf: string; size: number; mtime: number; seconds: number; thumb: 1 | 0 | -1; fav: boolean; watched?: boolean; device?: boolean; folder?: string };
+export type Video = { id: string; path: string; name: string; ext: string; shelf: string; size: number; mtime: number; seconds: number; thumb: 1 | 0 | -1; fav: boolean; watched?: boolean; device?: boolean; folder?: string;
+  /** a YouTube link (played from YouTube; its title and thumbnail kept here) */ link?: "youtube"; yt?: string; start?: number; author?: string };
 export type Playlist = { id: string; name: string; items: string[]; made: number };
 /** Shows gathered under a name ("Kids"), in an order of one's own: each item is "<shelf>/<folder inside it>". */
 export type Collection = { id: string; name: string; items: string[]; kids?: boolean };
@@ -59,6 +62,8 @@ export function useLibrary(): { lib: Library | null; error: string } {
 export const theaterApi = {
   fav: (id: string, on: boolean) => call<{ fav: boolean }>("/api/theater/fav", { id, on }),
   move: (path: string, shelf: string) => call<{ path: string }>("/api/theater/move", { path, shelf }),
+  addLink: (url: string, shelf: string) => call<{ id: string; shelf: string; title: string; again: boolean }>("/api/theater/link", { url, shelf }),
+  dropLink: (id: string) => call<{ ok: true }>("/api/theater/link", { id, drop: true }),
   shelf: (name: string) => call<{ shelf: string }>("/api/theater/shelf", { name, device: deviceName() }),
   /** A shelf, or a show folder on one, added to another shelf (moved there as a folder of its own); to "" it
    *  becomes a shelf of its own. */
@@ -199,11 +204,12 @@ export type Job = {
   state: "checking" | "waiting" | "sending" | "done" | "kept" | "failed";
   sent: number;
   error?: string;
+  /** the device stopped letting the page read the file: choosing it again carries on */
+  reread?: boolean;
   /** where it's kept on the desktop */
   path?: string;
 };
 
-const PIECE = 8 * 1024 * 1024;
 let jobs: Job[] = [];
 const jobListeners = new Set<() => void>();
 const jobsChanged = () => {
@@ -226,8 +232,19 @@ export const isVideoFile = (f: File) => f.type.startsWith("video/") || /\.(mp4|m
 
 /** Back these up onto a shelf. Ones the desktop already has are marked kept straight away. */
 export async function backUp(files: File[], shelf: string) {
-  const fresh: Job[] = files.filter(isVideoFile).map((file) => ({ key: `${file.name}\u0000${file.size}\u0000${Math.random()}`, file, shelf, state: "checking", sent: 0 }));
-  if (!fresh.length) return 0;
+  const videos = files.filter(isVideoFile);
+  // the same video chosen again for a backup that stopped: it takes the new file and carries on from what arrived
+  let resumed = 0;
+  const rest = videos.filter((file) => {
+    const old = jobs.find((j) => j.shelf === shelf && j.file.name === file.name && j.file.size === file.size && (j.state === "failed" || j.reread));
+    if (!old) return true;
+    setJob(old, { file, state: "waiting", error: undefined, reread: false });
+    resumed++;
+    return false;
+  });
+  if (resumed) void run();
+  const fresh: Job[] = rest.map((file) => ({ key: `${file.name}\u0000${file.size}\u0000${Math.random()}`, file, shelf, state: "checking", sent: 0 }));
+  if (!fresh.length) return resumed;
   jobs = [...jobs, ...fresh];
   jobsChanged();
   try {
@@ -237,7 +254,7 @@ export async function backUp(files: File[], shelf: string) {
     fresh.forEach((j) => setJob(j, { state: "waiting" }));
   }
   void run();
-  return fresh.length;
+  return fresh.length + resumed;
 }
 
 export function clearFinished() {
@@ -260,15 +277,42 @@ export function retryJob(j: Job) {
 let running = false;
 let lock: { release: () => Promise<void> } | null = null;
 
-async function run() {
-  if (running) return;
-  running = true;
-  // keep the phone's screen on while it sends, or it stops halfway when the screen goes dark
+// keep the phone's screen on while it sends, or it stops halfway when the screen goes dark. The browser lets go of
+// the lock whenever the page is hidden, so it's asked for again each time the page comes back.
+async function holdScreen() {
+  if (lock || document.visibilityState !== "visible") return;
   try {
-    lock = (await (navigator as Navigator & { wakeLock?: { request: (t: "screen") => Promise<{ release: () => Promise<void> }> } }).wakeLock?.request("screen")) ?? null;
+    const l = (await (navigator as Navigator & { wakeLock?: { request: (t: "screen") => Promise<{ release: () => Promise<void> } & EventTarget> } }).wakeLock?.request("screen")) ?? null;
+    if (!running) return void l?.release().catch(() => {});
+    lock = l;
+    l?.addEventListener("release", () => {
+      if (lock === l) lock = null;
+    });
   } catch {
     lock = null;
   }
+}
+
+// a wait between tries ends early when the connection or the page comes back
+let wakeUp: (() => void) | null = null;
+const pause = (ms: number) =>
+  new Promise<void>((r) => {
+    const t = setTimeout(() => ((wakeUp = null), r()), ms);
+    wakeUp = () => (clearTimeout(t), (wakeUp = null), r());
+  });
+if (typeof window !== "undefined") {
+  window.addEventListener("online", () => wakeUp?.());
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible" || !running) return;
+    void holdScreen();
+    wakeUp?.();
+  });
+}
+
+async function run() {
+  if (running) return;
+  running = true;
+  await holdScreen();
   try {
     let j: Job | undefined;
     while ((j = jobs.find((x) => x.state === "waiting"))) await send(j);
@@ -280,8 +324,6 @@ async function run() {
   }
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 async function sha256(b: ArrayBuffer): Promise<string> {
   // crypto.subtle needs the secure (https) address; over plain http the desktop takes the piece unchecked
   if (!crypto.subtle) return "";
@@ -292,36 +334,19 @@ async function sha256(b: ArrayBuffer): Promise<string> {
 async function send(j: Job) {
   const f = j.file;
   const base = { shelf: j.shelf, name: f.name, size: String(f.size), modified: String(f.lastModified || ""), device: deviceName() };
-  setJob(j, { state: "sending", error: undefined });
-  let tries = 0;
-  for (;;) {
-    if (!jobs.includes(j)) return; // cancelled
-    try {
-      const st = await fetch(`/api/theater/upload?${new URLSearchParams(base)}`).then((r) => r.json() as Promise<{ have: number }>);
-      let at = st.have;
-      setJob(j, { sent: at });
-      while (at < f.size) {
-        if (!jobs.includes(j)) return;
-        const piece = await f.slice(at, Math.min(f.size, at + PIECE)).arrayBuffer();
-        const sum = await sha256(piece);
-        const r = await fetch(`/api/theater/upload?${new URLSearchParams({ ...base, offset: String(at) })}`, { method: "POST", headers: sum ? { "X-Sha256": sum } : {}, body: piece });
-        const res = (await r.json().catch(() => ({}))) as { have?: number; done?: boolean; path?: string; error?: string };
-        if (r.status === 422) continue; // damaged on the way: the same piece again
-        if (!r.ok) throw Object.assign(new Error(res.error || `The desktop answered ${r.status}.`), { final: r.status < 500 });
-        at = res.have ?? at;
-        tries = 0;
-        setJob(j, { sent: at });
-        if (res.done) return setJob(j, { state: "done", path: res.path });
-      }
-      return;
-    } catch (e) {
-      const err = e as Error & { final?: boolean };
-      if (err.final || ++tries > 30) return setJob(j, { state: "failed", error: err.message || "It stopped." });
-      // Wi-Fi dropped or the desktop restarted: wait, then carry on from what arrived
-      setJob(j, { error: `Connection lost; trying again (${tries})…` });
-      await sleep(Math.min(20_000, 2000 * tries));
-    }
-  }
+  setJob(j, { state: "sending", error: undefined, reread: false });
+  const end = await sendPieces({
+    file: f,
+    url: (offset) => `/api/theater/upload?${new URLSearchParams(offset === undefined ? base : { ...base, offset: String(offset) })}`,
+    fetch: (...a) => fetch(...a),
+    sha256,
+    alive: () => jobs.includes(j),
+    progress: (sent, note) => setJob(j, { sent, error: note }),
+    pause,
+    whole: (url, file, progress) => wholeUpload(url, file, progress),
+  });
+  if (end.state === "done") setJob(j, { state: "done", error: undefined, path: end.path });
+  else if (end.state === "failed") setJob(j, { state: "failed", error: end.error, reread: !!end.reread });
 }
 
 export const sizeText = (n: number) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : n >= 1e6 ? `${Math.round(n / 1e6)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`);
@@ -336,4 +361,33 @@ export async function changeCollection(c: { id?: string; name?: string; items?: 
   const saved = await theaterApi.collection(c);
   await refreshLibrary();
   return saved;
+}
+
+// ── a video handed over from Explorer ("Open in… → Theatre") ─────────────────────────────────────────────
+let asked: string | null = null;
+/** Play this file in the Theatre: the library's copy when it's on a shelf, or just the file when it isn't. */
+export function askTheater(path: string) {
+  asked = path;
+  window.dispatchEvent(new Event("pdd-theater-ask"));
+}
+/** The file asked for, once (the Theatre takes it when it opens, or straight away if it's open). */
+export function takeTheaterAsk(): string | null {
+  const p = asked;
+  asked = null;
+  return p;
+}
+
+// ── videos put in the queue from outside the Theatre (a tool, a ferry window, a jetty): by id, plain data ──────
+let queued: { ids: string[]; where: QueueWhere }[] = [];
+/** Queue these videos (by library id) next, last, or after the current show's season; the Theatre takes them when it
+ *  opens, or straight away if it's open. */
+export function queueInTheatre(ids: string[], where: QueueWhere) {
+  queued.push({ ids, where });
+  window.dispatchEvent(new Event("pdd-theater-queue"));
+}
+/** What's waiting to be queued, once. */
+export function takeTheatreQueue(): { ids: string[]; where: QueueWhere }[] {
+  const q = queued;
+  queued = [];
+  return q;
 }

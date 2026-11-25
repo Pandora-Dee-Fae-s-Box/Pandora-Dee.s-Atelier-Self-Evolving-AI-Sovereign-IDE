@@ -59,7 +59,7 @@ export function SharedIn() {
     }
   };
 
-  /** Videos: into Media Theater, in checked pieces that survive a dropped connection, onto this phone's usual shelf. */
+  /** Videos: into Media Theatre, in checked pieces that survive a dropped connection, onto this phone's usual shelf. */
   const videos = files.every(isVideoFile);
   const toTheater = async () => {
     let shelf = "";
@@ -94,7 +94,7 @@ export function SharedIn() {
         <p className="small muted">
           {videos ? (
             <>
-              <b>Back up to Theater</b> keeps them with your videos{" "}
+              <b>Back up to Theatre</b> keeps them with your videos{" "}
               {(() => {
                 try {
                   const s = localStorage.getItem("pdd-theater-shelf");
@@ -122,7 +122,7 @@ export function SharedIn() {
           </button>
           {videos ? (
             <button className="btn primary" disabled={Boolean(busy)} onClick={() => void toTheater()}>
-              Back up to Theater
+              Back up to Theatre
             </button>
           ) : null}
         </div>

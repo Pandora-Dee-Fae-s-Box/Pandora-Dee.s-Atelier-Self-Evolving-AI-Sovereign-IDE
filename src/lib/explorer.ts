@@ -5,6 +5,7 @@
 import { useSyncExternalStore } from "react";
 import { desk } from "./store.ts";
 import { library } from "./xdc.ts";
+import { wholeUpload } from "./uploadCore.ts";
 
 export type Entry = { name: string; path: string; dir: boolean; size: number; mtime: number; ext: string };
 export type Place = { id: string; name: string; path: string; kind: string };
@@ -51,8 +52,15 @@ export const fileApi = {
   serve: (p: string, on: boolean) => call<{ serve: boolean }>("/api/library/serve", { path: p, on }),
   unzip: (p: string) => call<{ path: string; files: number }>("/api/files/unzip", { path: p }),
   importXdc: (p: string) => call<{ id: string | null; added: number; errors: string[] }>("/api/files/import-xdc", { path: p }),
-  async upload(dir: string, file: File): Promise<string> {
-    const r = await fetch(`/api/files/upload?dir=${q(dir)}`, { method: "POST", headers: { "X-Filename": encodeURIComponent(file.name) }, body: file });
+  /** One file into a folder. With `progress`, it reports how much has gone (through XMLHttpRequest; fetch can't). */
+  async upload(dir: string, file: File, progress?: (sent: number) => void): Promise<string> {
+    const url = `/api/files/upload?dir=${q(dir)}`, headers = { "X-Filename": encodeURIComponent(file.name) };
+    if (progress) {
+      const r = await wholeUpload(url, file, progress, headers);
+      if (r.status < 200 || r.status >= 300) throw new Error((r.json as { error?: string }).error || (r.status ? `Upload failed (${r.status}).` : `${file.name}: the connection dropped while it went up.`));
+      return (r.json as { path?: string }).path ?? "";
+    }
+    const r = await fetch(url, { method: "POST", headers, body: file });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error((j as { error?: string }).error || `Upload failed (${r.status}).`);
     return (j as { path: string }).path;

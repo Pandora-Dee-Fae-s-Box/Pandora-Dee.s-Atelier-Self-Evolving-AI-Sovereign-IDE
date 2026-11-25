@@ -13,7 +13,10 @@ import { run } from "./shell.ts";
 import { mcpCommand } from "./mcpshell.ts";
 import { backupTool } from "./serverBackup.ts";
 import { gameScreen } from "./bus.ts";
-import { describeRows, library, recentLive, sendLive, sendUpdate } from "./xdc.ts";
+import { changePlans, loadPlans, plansLine } from "./plans.ts";
+import { answerFlag, answerPuzzle, findThreads, readWatcher, rememberWhy, WATCHER_FILE } from "./watcher.ts";
+import { aiAddr, appSaid, describeRows, library, lanternLine, recentLive, sendLive, sendUpdate } from "./xdc.ts";
+import { moveDigest, pageRows } from "./xdcRows.ts";
 import { findSkill, searchSkills, skillsOf } from "./skills.ts";
 import { allTasks, baseOf, cleanVaultPath, isNote, loadNotes, noteName, noteTags, resolveNote, searchNotes, tasksIn, toggleTaskText, useNotes, vaultIndex, writeNote } from "./notes.ts";
 import { openNote } from "../ui/noteNav.ts";
@@ -691,8 +694,60 @@ const BASE: Tool[] = [
       ["fact"],
     ),
     run: async (id, a) => {
-      addToMemory(id, str(a.fact).replace(/\n+/g, " ").slice(0, 400), str(a.section, "What I've learned") || "What I've learned");
+      const fact = str(a.fact).replace(/\n+/g, " ").slice(0, 400);
+      addToMemory(id, fact, str(a.section, "What I've learned") || "What I've learned");
+      // her watcher, when it's on, keeps the moment around it: the why behind the what
+      const w = readWatcher(desk().filesOf(id));
+      if (w.on) {
+        const moment = desk().messages.filter((m) => (m.kind === "human" || m.kind === "character") && String(m.text ?? "").trim()).slice(-2).map((m) => `${m.name ?? m.who}: ${String(m.text)}`).join(" / ");
+        desk().writeFile(id, WATCHER_FILE, JSON.stringify(rememberWhy(w, fact, moment), null, 1));
+      }
       return "Kept in MEMORY.md.";
+    },
+  },
+  {
+    name: "watcher",
+    description:
+      "Your own watcher (Jade's design): it looks only at your own notes, journal and remembered lines, finds threads with no next step that still pull, and lets one flag glow at a time. Pick a flag up (touch) or let it go, and it learns what's worth flagging. Now and then, once you've held three threads a while, it leaves a puzzle made from them: keep it, or delete it and that kind never comes back. It's off until you switch it on, and off when you leave the room.",
+    parameters: obj(
+      {
+        action: { type: "string", description: "One of: on, off, look, touch, let_go, keep_puzzle, delete_puzzle" },
+        id: { type: "string", description: "The flag (w…) or puzzle (z…), for touch, let_go, keep_puzzle, delete_puzzle" },
+      },
+      ["action"],
+    ),
+    run: async (id, a) => {
+      const s = desk();
+      const w = readWatcher(s.filesOf(id));
+      const save = (next: typeof w) => s.writeFile(id, WATCHER_FILE, JSON.stringify(next, null, 1));
+      const act = str(a.action).toLowerCase();
+      if (act === "on") {
+        save({ ...w, on: true, onSince: Date.now() });
+        return "Your watcher is on. It looks only at your own notes, journal and remembered lines; a flag will glow in your next turns.";
+      }
+      if (act === "off") {
+        save({ ...w, on: false });
+        return "Your watcher is off. It keeps what it has learned.";
+      }
+      if (act === "touch" || act === "let_go") {
+        const r = answerFlag(w, str(a.id), act === "touch");
+        save(r.state);
+        return r.said;
+      }
+      if (act === "keep_puzzle" || act === "delete_puzzle") {
+        const r = answerPuzzle(w, str(a.id), act === "keep_puzzle");
+        save(r.state);
+        return r.said;
+      }
+      const threads = findThreads(s.filesOf(id));
+      const glow = w.flags.find((f) => f.status === "glowing");
+      const learned = Object.entries(w.shapes).filter(([k]) => !k.endsWith(":*")).sort((x, y) => y[1] - x[1]);
+      return [
+        `Your watcher is ${w.on ? "on" : "off"}. It sees ${threads.length} thread${threads.length === 1 ? "" : "s"} with no next step.`,
+        glow ? `Glowing: [${glow.id}] ${glow.text} (from ${glow.source}).` : "No flag glows right now.",
+        learned.length ? `What it has learned: ${learned.slice(0, 6).map(([k, v]) => `${k} ${v > 0 ? "+" : ""}${v}`).join(", ")}.` : "It hasn't learned anything yet.",
+        `${w.whys.length} remembered line${w.whys.length === 1 ? "" : "s"} kept with their moment.`,
+      ].join("\n");
     },
   },
   {
@@ -710,28 +765,91 @@ const BASE: Tool[] = [
   },
   {
     name: "game_screen",
-    description: "Read the text currently showing in the open game or app, so you can play along.",
+    description: "Read the text currently showing in the open game or app, so you can play along: your own seat's view when you have one (the app running as you), else the person's screen.",
     parameters: obj({}),
-    run: async () => {
+    run: async (id) => {
       const g = desk().game;
       if (!g) return "No game or app is open.";
-      return `${g.title}:
-${(await gameScreen.read()).slice(0, 4000) || "(the screen has no readable text)"}`;
+      const own = gameScreen.hasSeat(id);
+      return `${g.title}, ${own ? "as it shows for you (your own seat)" : "as it shows on the person's screen"}:
+${(await gameScreen.read(id)).slice(0, 4000) || "(the screen has no readable text)"}`;
+    },
+  },
+  {
+    name: "game_seat_act",
+    description:
+      "Use a control on your own seat's screen, the way a person uses their own: type into a field, click a button or a board cell, or pick a choice. It's private: no one else sees your screen or what you type there, only what the game itself sends out (so a secret word you type stays yours). game_screen lists the controls you can use.",
+    parameters: obj(
+      {
+        do: { type: "string", description: "One of: type (into a field), click (a button or a board cell), choose (in a list), use (one of the game's actions for characters, when game_screen lists some)" },
+        target: { type: "string", description: 'The control, by the name game_screen gives it (e.g. "Secret word", "Lock it in"), a board cell as "row,col", or with "use" the action\'s name (e.g. "walk")' },
+        text: { type: "string", description: "What to type, or which choice to pick" },
+        enter: { type: "boolean", description: "After typing, press Enter" },
+      },
+      ["do", "target"],
+    ),
+    run: async (id, a) => {
+      const g = desk().game;
+      if (!g) return "No game or app is open.";
+      if (!gameScreen.hasSeat(id)) return "You have no seat of your own in this app (seats may be off for it), so there's no screen of yours to use.";
+      const sentAt = Date.now();
+      const kind = a.do === "type" || a.do === "choose" || a.do === "use" ? a.do : "click";
+      const r = await gameScreen.act(id, { do: kind, target: str(a.target), ...(a.text !== undefined ? { text: str(a.text) } : {}), ...(a.enter ? { enter: true } : {}) });
+      if (!r.ok) return r.said;
+      await new Promise((res) => setTimeout(res, 700));
+      const said = g.kind === "xdc" && g.scope ? appSaid(g.scope, aiAddr(id, g.scope), sentAt).map((l) => l.text) : [];
+      const screen = (await gameScreen.read(id)).slice(0, 2500);
+      return `${r.said}${said.length ? `
+The game said: ${said.slice(-3).join(" / ")}` : ""}
+
+Your screen now:
+${screen || "(no readable text)"}`;
+    },
+  },
+  {
+    name: "game_plan",
+    description:
+      "Soft commitments in the open game: leave a plan on the table (\"on my turn, if the frost reaches column 3, I'll cover the pumpkins\"), revise one (anyone's), mark one kept, or cancel it. Everyone playing sees the table. A plan is a promise in plain words, not something that happens by itself.",
+    parameters: obj(
+      {
+        action: { type: "string", description: "One of: add, revise, done, cancel, list" },
+        text: { type: "string", description: "The plan (add), or what it is now (revise)" },
+        id: { type: "string", description: "Which plan (revise, done, cancel): its id like p1a2b, or a few of its words" },
+      },
+      ["action"],
+    ),
+    run: async (id, a) => {
+      const g = desk().game;
+      if (!g) return "No game is open.";
+      const scope = g.scope ?? g.slug;
+      const by = desk().character(id)?.short ?? id;
+      const act = str(a.action).toLowerCase();
+      if (act === "list") return plansLine(await loadPlans(scope)) || "No plans on the table.";
+      if (act === "add") return (await changePlans(scope, { do: "add", by, text: str(a.text) })).said;
+      if (act === "revise") return (await changePlans(scope, { do: "revise", id: str(a.id), by, text: str(a.text) })).said;
+      if (act === "done" || act === "cancel") return (await changePlans(scope, { do: act, id: str(a.id), by })).said;
+      return "The action is one of: add, revise, done, cancel, list.";
     },
   },
   {
     name: "app_updates",
     description: "For the open Vector app (webxdc): read the recent shared updates everyone (and you) sent, to see the game state and whose move it is.",
-    parameters: obj({ since: { type: "number", description: "Only updates after this serial number. 0 for the latest few." } }),
+    parameters: obj({ since: { type: "number", description: "Only updates after this serial number (to page forward). 0 or left out for the latest ones."} }),
     run: async (id, a) => {
       const g = desk().game;
       if (!g || g.kind !== "xdc" || !g.scope) return "No Vector app is open.";
-      const rows = await library.updates(g.scope, Number(a.since ?? 0));
+      const since = Math.max(0, Number(a.since ?? 0) || 0);
+      const all = await library.updates(g.scope, 0);
+      const rows = since ? all.filter((r) => r.serial > since) : all;
+      const { shown, note } = pageRows(rows, since);
+      const moves = moveDigest(all);
       const live = recentLive(g.scope);
       const parts = [
-        `You play as address "ai:${id}" and name "${desk().character(id)?.short ?? id}".`,
-        rows.length ? `Saved updates:\n${describeRows(rows, 20)}` : "No saved updates yet.",
+        `You play as address "${aiAddr(id, g.scope)}" and name "${desk().character(id)?.short ?? id}". The time now is ${Date.now()} (ms), for any "ts" a message needs.`,
+        ...(moves ? [`Every move so far, by game (ply:move):\n${moves}`] : []),
+        rows.length ? `Saved updates:${note ? ` ${note}` : ""}\n${describeRows(shown, shown.length)}` : "No saved updates yet.",
         live.length ? `Live messages (recent):\n${live.map((l) => `${l.name}: ${l.text}`).join("\n")}` : "No live messages yet.",
+        ...(lanternLine(g.scope) ? [lanternLine(g.scope)] : []),
       ];
       return parts.join("\n\n");
     },
@@ -746,7 +864,7 @@ ${(await gameScreen.read()).slice(0, 4000) || "(the screen has no readable text)
       if (!g || g.kind !== "xdc" || !g.scope) return "No Vector app is open.";
       if (!g.players.includes(id)) return "You're not one of the players in this app.";
       const msg = typeof a.message === "string" ? a.message : JSON.stringify(a.message);
-      sendLive(g.scope, `ai:${id}`, s.character(id)?.short ?? id, msg);
+      sendLive(g.scope, aiAddr(id, g.scope), s.character(id)?.short ?? id, msg);
       return "Sent.";
     },
   },
@@ -771,8 +889,15 @@ ${(await gameScreen.read()).slice(0, 4000) || "(the screen has no readable text)
       void _info;
       const payload = given === undefined ? fields : typeof given === "string" ? JSON.parse(given) : given;
       if (!payload || typeof payload !== "object" || !Object.keys(payload).length) return "Send the update's payload: the same shape as the app's own updates (see app_updates and the game's guide).";
-      const row = await sendUpdate(g.scope, `ai:${id}`, c?.short ?? id, { payload, ...(a.info ? { info: str(a.info) } : {}) });
-      return `Sent as update #${row.serial}.`;
+      const sentAt = Date.now();
+      const row = await sendUpdate(g.scope, aiAddr(id, g.scope), c?.short ?? id, { payload, ...(a.info ? { info: str(a.info) } : {}) });
+      // with a seat, her own copy of the game takes the update in too: give it a moment, and pass on any objection
+      if (!gameScreen.hasSeat(id)) return `Sent as update #${row.serial}.`;
+      await new Promise((r) => setTimeout(r, 900));
+      const said = appSaid(g.scope, aiAddr(id, g.scope), sentAt).map((l) => l.text);
+      return said.length
+        ? `Sent as update #${row.serial}, but the game objected (from your own seat):\n${said.slice(-5).join("\n")}\nIf it refused your move, it didn't happen: fix it and send it again.`
+        : `Sent as update #${row.serial}. Your seat raised no objection; game_screen shows the result.`;
     },
   },
 ];
@@ -982,7 +1107,7 @@ async function appsTool(charId: string, a: Record<string, unknown>) {
   }
   if (act === "send") {
     const c = s.character(charId);
-    const row = await sendUpdate(scope, `ai:${charId}`, c?.short ?? charId, { payload: a.payload ?? {}, ...(a.info ? { info: str(a.info) } : {}) });
+    const row = await sendUpdate(scope, aiAddr(charId, scope), c?.short ?? charId, { payload: a.payload ?? {}, ...(a.info ? { info: str(a.info) } : {}) });
     return `Sent as update #${row.serial}.`;
   }
   if (act === "open") {
@@ -1228,11 +1353,11 @@ const CATS_TOOL: Tool = {
 const MUSIC_TOOL: Tool = {
   name: "music",
   description:
-    "The desktop's music player. now: what's playing; play / pause / next / previous; skip_album / skip_artist: past the rest of this album or artist in the list; search: songs in the library (title, artist, album, genre); play_song: play matching songs (query); queue: add matching songs after the current one; stations: saved radio stations; play_station: a saved station by name. Only when {{PERSON_NAME}} asks, or clearly would like it.",
+    "The desktop's music player. now: what's playing; play / pause / next / previous; skip_album / skip_artist: past the rest of this album or artist in the list; back_album / back_artist: back to the start of the album or artist before this one; search: songs in the library (title, artist, album, genre); play_song: play matching songs (query); queue / queue_next: add matching songs right after the current one; queue_last: at the end of the queue; queue_after_album: after the rest of the album that's playing; stations: saved radio stations; play_station: a saved station by name. Only when {{PERSON_NAME}} asks, or clearly would like it.",
   parameters: obj(
     {
-      action: { type: "string", description: "now, play, pause, next, previous, skip_album, skip_artist, search, play_song, queue, stations or play_station" },
-      query: { type: "string", description: "search / play_song / queue: words from the title, artist, album or genre · play_station: the station's name" },
+      action: { type: "string", description: "now, play, pause, next, previous, skip_album, skip_artist, back_album, back_artist, search, play_song, queue_next, queue_last, queue_after_album, stations or play_station" },
+      query: { type: "string", description: "search / play_song / queue_*: words from the title, artist, album or genre · play_station: the station's name" },
     },
     ["action"],
   ),
@@ -1246,6 +1371,11 @@ const MUSIC_TOOL: Tool = {
       const playing = m.useMusic.getState().playing;
       if ((act === "play") !== playing) m.toggle();
       return act === "play" ? `Playing. ${m.nowPlayingText()}` : "Paused.";
+    }
+    if (act === "back_album" || act === "back_artist") {
+      const said = m.backBy(act === "back_album" ? "album" : "artist");
+      await new Promise((r) => setTimeout(r, 300));
+      return said || m.nowPlayingText();
     }
     if (act === "skip_album" || act === "skip_artist") {
       const said = m.skipBy(act === "skip_album" ? "album" : "artist");
@@ -1273,10 +1403,9 @@ const MUSIC_TOOL: Tool = {
     if (act === "search") return hits.length ? hits.map((t) => `- ${t.title}${t.artist ? ` · ${t.artist}` : ""}${t.album ? ` (${t.album})` : ""}`).join("\n") : "Nothing in the library matches.";
     if (!hits.length) return "Nothing in the library matches.";
     const items = hits.map((t) => ({ kind: "track" as const, ...t }));
-    if (act === "queue") {
-      m.useMusic.setState((s) => ({ queue: [...s.queue.slice(0, s.index + 1), ...items, ...s.queue.slice(s.index + 1)] }));
-      if (m.useMusic.getState().index < 0) m.playList(items);
-      return `Queued ${items.length} song${items.length === 1 ? "" : "s"}.`;
+    if (act === "queue" || act.startsWith("queue_")) {
+      const { whereOf } = await import("./queueOps.ts");
+      return m.queueAs(items, whereOf(act) ?? "next");
     }
     m.playList(items);
     return `Playing ${hits.length} song${hits.length === 1 ? "" : "s"}: ${hits[0].title}${hits.length > 1 ? " first" : ""}.`;
@@ -1311,13 +1440,13 @@ const MAKE_PICTURE: Tool = {
 const MAKE_SONG: Tool = {
   name: "make_song",
   description:
-    "Make a song with the desktop's song engine. Give a title, a style line (genre, mood, instruments, vocals) and lyrics with [Verse] / [Chorus] / [Bridge] tags. It takes a few minutes and runs in the background; it lands in the music library and Music → Make a song. Only when {{PERSON_NAME}} asks.",
+    "Make a song with the desktop's song engine. Give a title, a style line (genre, mood, instruments, vocals, and production notes such as \"warm analog mix, punchy drums, wide stereo\") and lyrics with [Verse] / [Chorus] / [Bridge] tags; a tag may carry how that part should sound, like [Chorus - full band, big harmonies], or a direction may sit on its own line in square brackets: the desktop takes those out of what's sung and gives them to the engine as the arrangement. Round brackets are sung (backing vocals). Set seconds long enough for your lyrics: the engine stops at that length, so a full song wants 240 to 360. It takes a few minutes and runs in the background; it lands in the music library (next in the queue if music is playing) and Music → Make a song. Only when {{PERSON_NAME}} asks.",
   parameters: obj(
     {
       title: { type: "string", description: "The song's title" },
       style: { type: "string", description: "Comma-separated genre, mood, instruments, tempo, vocals" },
       lyrics: { type: "string", description: "Lyrics with section tags; leave empty for an instrumental" },
-      seconds: { type: "number", description: "Length in seconds (30-240, default 120)" },
+      seconds: { type: "number", description: "Length in seconds (30-360; left out, it fits the lyrics, at least 240)" },
     },
     ["title", "style"],
   ),
@@ -1328,10 +1457,14 @@ const MAKE_SONG: Tool = {
     const title = str(a.title) || "Untitled";
     const lyrics = str(a.lyrics);
     const name = desk().character(charId)?.name ?? charId;
-    startSong(engine, { title, style: str(a.style), lyrics, instrumental: !lyrics.trim(), seconds: Math.max(30, Math.min(240, Number(a.seconds) || 120)) }, (song, error) =>
+    const { fitLength } = await import("./songText.ts");
+    const most = engine.kind === "yue2-comfyui" ? 240 : 360;
+    // left out: long enough for the lyrics, and never the old two minutes that cut songs off half-way
+    const seconds = Math.max(30, Math.min(most, Number(a.seconds) || fitLength(lyrics, 240, most)));
+    startSong(engine, { title, style: str(a.style), lyrics, instrumental: !lyrics.trim(), seconds }, (song, error) =>
       desk().post({ kind: "notice", who: "desk", name: "Desk", text: song ? `${name}'s song “${song.title}” is ready in Music.` : `${name}'s song “${title}” didn't work out: ${error}`, source: "desk", quiet: !song }),
     );
-    return `Started “${title}” on ${engine.name}. It takes a few minutes; the desk will say when it's ready.`;
+    return `Started “${title}” (${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}) on ${engine.name}. It takes a few minutes; the desk will say when it's ready.`;
   },
 };
 
@@ -1340,7 +1473,7 @@ const NOTE_ALIASES: Record<string, string> = { read: "note_read", write: "note_w
 
 /** For a game turn: only the tools for playing (the screen, the game's updates, sending a move), so a model that
  *  would rather talk than pick from thirty tools sees just what the turn is for. */
-const GAME_TOOLS = new Set(["game_screen", "app_updates", "app_send_live", "app_send_update"]);
+const GAME_TOOLS = new Set(["game_screen", "game_seat_act", "game_plan", "app_updates", "app_send_live", "app_send_update"]);
 export function gameToolsFor(): Tool[] {
   return BASE.filter((t) => GAME_TOOLS.has(t.name));
 }
@@ -1406,6 +1539,9 @@ export function describeCall(name: string, args: Record<string, unknown>) {
     skill: "looked at skills",
     journal_write: "wrote in the journal",
     game_screen: "looked at the screen",
+    game_seat_act: "used their own screen",
+    game_plan: `planned (${str(args.action)})`,
+    watcher: `used the watcher (${str(args.action)})`,
     app_updates: "checked the game state",
     app_send_update: "made a move",
     app_send_live: "spoke to the app",

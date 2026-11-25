@@ -715,6 +715,7 @@ body.dragging-window iframe, body.dragging-window webview { pointer-events: none
 .album img, .album .no-cover { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; }
 .no-cover { display: grid; place-items: center; background: var(--raise); color: var(--faint); border-radius: 8px; }
 .album b { font-size: .9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.album .album-copy { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .album-view { padding: 12px; }
 .album-head { display: flex; gap: 14px; align-items: flex-end; margin-bottom: 10px; }
 .album-head img, .album-head .no-cover { width: 120px; height: 120px; object-fit: cover; border-radius: 10px; }
@@ -1015,7 +1016,7 @@ body.dragging-window iframe, body.dragging-window webview { pointer-events: none
 .cat { position: absolute; left: 0; top: 0; pointer-events: auto; cursor: pointer; will-change: transform; }
 .cat-bubble { position: absolute; left: 0; top: 0; font-size: 11px; font-weight: 600; color: var(--text); text-shadow: 0 1px 3px rgba(0, 0, 0, .7); pointer-events: none; transition: opacity .3s; white-space: nowrap; }
 
-/* Media Theater */
+/* Media Theatre */
 .good-text { color: var(--good); }
 .bad-text { color: var(--bad); }
 .theater { display: flex; flex-direction: column; height: 100%; min-height: 0; position: relative; }
@@ -1052,6 +1053,8 @@ body.dragging-window iframe, body.dragging-window webview { pointer-events: none
 .theater-bar .btn.on { color: #ffd76a; }
 .theater-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .theater-video { flex: 1; min-height: 0; width: 100%; background: #000; object-fit: contain; }
+iframe.theater-video { border: 0; }
+.theater-yt-off { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; color: #ddd; padding: 16px; text-align: center; }
 .theater-nav { justify-content: space-between; }
 .theater-nav .btn { display: inline-flex; align-items: center; gap: 4px; max-width: 40%; }
 .theater-nav-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .85em; }
@@ -1158,7 +1161,7 @@ html { touch-action: pan-x pan-y; }
 /* a button that reads like a link, inside a sentence */
 .linkish { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-decoration: underline; text-underline-offset: 2px; }
 
-/* Theater's sidebar: kinds, collections, playlists, shelves by device, folders, other devices */
+/* Theatre's sidebar: kinds, collections, playlists, shelves by device, folders, other devices */
 .theater-body { flex: 1; display: flex; min-height: 0; position: relative; }
 .theater-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; padding-top: 6px; }
 .theater-side { width: 220px; overflow-y: auto; padding: 6px; gap: 1px; scrollbar-width: thin; }
@@ -1183,3 +1186,69 @@ html { touch-action: pan-x pan-y; }
 .room-tab.on { background: var(--raise); border-color: var(--line); color: inherit; font-weight: 600; }
 .room-tab.going { opacity: .6; }
 .room-tab.add { padding: 4px 7px; }
+.explorer-uploading { position: sticky; top: 0; z-index: 2; padding: 8px 12px; background: var(--panel-solid); border-bottom: 1px solid var(--line); }
+.music-queue { border-top: 1px solid var(--line); background: rgba(0,0,0,.2); max-height: 38%; min-height: 120px; display: flex; flex-direction: column; }
+.music-queue-head { display: flex; gap: 8px; align-items: center; padding: 6px 12px; }
+.music-queue-list { overflow: auto; padding: 0 8px 8px; display: flex; flex-direction: column; gap: 1px; }
+.music-queue-row { display: flex; gap: 10px; align-items: baseline; text-align: left; border: 0; background: transparent; color: var(--text); padding: 4px 8px; border-radius: 6px; font: inherit; cursor: default; }
+.music-queue-row:hover { background: rgba(255,255,255,.05); }
+.music-queue-row.on { background: rgba(185,164,255,.16); font-weight: 600; }
+.music-queue-row.past { opacity: .6; }
+.music-queue-row .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.visualizer:focus { outline: none; }
+.viz-overlay { position: absolute; left: 12px; top: 10px; max-width: calc(100% - 24px); padding: 6px 10px; border-radius: 8px; background: rgba(0,0,0,.55); color: #fff; text-shadow: 0 1px 3px #000; pointer-events: none; font-size: .9em; white-space: pre-wrap; }
+.viz-overlay.help { font-family: ui-monospace, Consolas, monospace; font-size: .82em; line-height: 1.6; }
+.game-body { flex: 1; min-height: 0; display: flex; position: relative; }
+/* Dee's lantern: quiet when every copy agrees, warm amber when one is behind */
+.game-lantern { position: absolute; left: 10px; bottom: 10px; z-index: 3; max-width: min(340px, calc(100% - 20px)); }
+.game-lantern-bead { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line, rgba(255,255,255,.15)); background: var(--panel-solid); color: inherit; border-radius: 999px; padding: 3px 9px; cursor: pointer; opacity: .55; font: inherit; }
+.game-lantern-bead:hover, .game-lantern.open .game-lantern-bead, .game-lantern.drift .game-lantern-bead { opacity: 1; }
+.game-lantern.drift .game-lantern-bead { border-color: #e0a040; box-shadow: 0 0 10px rgba(224,160,64,.45); }
+.game-lantern-card { margin-top: 6px; padding: 10px 12px; border-radius: 10px; background: var(--panel-solid); border: 1px solid var(--line, rgba(255,255,255,.15)); display: grid; gap: 6px; }
+.game-lantern-card ul { margin: 0; padding-left: 18px; }
+.room-temp { position: relative; display: inline-flex; }
+.room-temp-card { position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; width: min(360px, 86vw); padding: 10px 12px; border-radius: 12px; background: var(--panel-solid); border: 1px solid var(--line, rgba(255,255,255,.15)); box-shadow: 0 8px 28px rgba(0,0,0,.4); display: grid; gap: 8px; }
+.room-temp-row { display: grid; gap: 2px; padding-left: 8px; border-left: 3px solid #5f6b8a; }
+.room-temp-row.warm { border-left-color: #d9a45a; } .room-temp-row.lively { border-left-color: #e2643f; }
+.room-temp-last { opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.room-temp-wander { color: #e0a040; }
+.linked-games { display: grid; gap: 8px; margin-bottom: 8px; }
+.linked-game { padding: 8px 10px; border-radius: 10px; border: 1px solid #7b5fb0; background: rgba(123, 95, 176, .12); display: grid; gap: 6px; }
+.linked-game .row, .game-link .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.game-link { display: grid; gap: 6px; border-top: 1px solid var(--line, rgba(255,255,255,.12)); padding-top: 8px; }
+.game-link select.input { width: auto; min-width: 0; }
+.game-plans { border-bottom: 1px solid var(--line, rgba(255,255,255,.12)); padding: 6px 8px; display: grid; gap: 4px; }
+.game-plans-head { background: none; border: 0; color: inherit; text-align: left; padding: 2px 0; cursor: pointer; font-weight: 600; }
+.game-plan { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.game-plan-acts { margin-left: auto; display: inline-flex; gap: 4px; }
+.btn.tiny { padding: 0 6px; min-height: 0; line-height: 1.6; font-size: 11px; }
+.game-lantern-card .ok { color: #7fd0a0; } .game-lantern-card .warn { color: #e0a040; }
+.game-body .game-frame { flex: 1; min-width: 0; }
+.game-chat { width: min(300px, 40%); display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--panel-solid); }
+.game-chat-list { flex: 1; overflow: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; font-size: .9em; }
+.game-chat-line { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.35; }
+.game-chat-line b { color: var(--accent); }
+.game-chat-line.me b { color: var(--text); }
+.game-chat-say { display: flex; gap: 6px; padding: 6px; border-top: 1px solid var(--line); }
+.game-chat-say .input { flex: 1; min-width: 0; }
+
+/* the characters' seats: real, laid-out copies of the app (so canvases have a size), kept out of sight */
+.game-seats { position: fixed; left: -20000px; top: 0; width: 960px; height: 640px; overflow: hidden; pointer-events: none; }
+.game-seat { width: 960px; height: 640px; border: 0; display: block; }
+/* watching a seat: the same running copy, brought into view at half size, watch-only */
+.game-seats.watching { left: auto; right: 20px; top: auto; bottom: 84px; width: 480px; height: 320px; z-index: 60; border-radius: 10px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55); outline: 1px solid var(--line, rgba(255, 255, 255, 0.15)); }
+.game-seats.watching .game-seat { position: absolute; left: -20000px; }
+.game-seats.watching .game-seat.watched { position: static; transform: scale(0.5); transform-origin: 0 0; }
+.seat-watch { position: fixed; right: 20px; bottom: 84px; z-index: 61; display: flex; gap: 6px; align-items: center; padding: 4px 8px; border-radius: 999px; background: var(--panel, rgba(20, 16, 30, 0.85)); font-size: 12px; opacity: 0.85; }
+.seat-watch.on { bottom: 412px; }
+.seat-watch .chip.on { outline: 1px solid currentColor; }
+
+/* well-known models (ui/ModelChooser.tsx): grouped by the memory they need */
+.model-catalog { display: grid; gap: 8px; margin-top: 6px; padding: 8px; border: 1px solid var(--line, rgba(127,127,127,.25)); border-radius: 8px; max-height: 320px; overflow: auto; }
+.model-catalog > div > b { display: block; margin: 4px 0 2px; }
+.model-row { display: flex; gap: 6px; align-items: center; padding: 4px 0; border-top: 1px solid var(--line, rgba(127,127,127,.15)); }
+.model-row a.btn { text-decoration: none; }
+
+/* songs kept on the engine (apps/SongMaker.tsx): a verdict that is set shows in the accent colour */
+.kept-song-wrap { padding: 2px 0; border-top: 1px solid var(--line, rgba(127,127,127,.12)); }
+.kept-song .icon-btn.on { color: var(--accent); }

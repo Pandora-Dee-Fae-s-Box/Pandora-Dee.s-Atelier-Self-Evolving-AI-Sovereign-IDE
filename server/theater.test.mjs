@@ -40,7 +40,7 @@ test("the list has shelves, the phone's share-menu videos, and knows what's kept
   fs.writeFileSync(path.join(vault, "From devices", "shared.MOV"), "1234567");
   fs.writeFileSync(path.join(vault, "From devices", "photo.jpg"), "not a video");
   const l = T.list();
-  assert.deepEqual(l.shelves, ["escape", "Kai's films", "From devices"]);
+  assert.deepEqual(l.shelves, ["∕..∕escape", "Kai's films", "From devices"]);  // the climb-out attempt: one folder inside Videos, its slashes kept as look-alikes
   assert.deepEqual(l.videos.map((v) => v.name).sort(), ["shared", "skate", "x"]);
   const skate = l.videos.find((v) => v.name === "skate");
   assert.equal(skate.shelf, "Kai's films");
@@ -105,7 +105,7 @@ test("a watched folder is a shelf of its own, read in the background, and left a
   assert.deepEqual(l.scanning, []);
   const v = l.videos.find((x) => x.name === "matrix");
   assert.ok(v && v.watched && v.shelf === "Movies", JSON.stringify(l.videos));
-  assert.equal(W.owns(v.path), null, "a watched folder's video isn't the Theater's to move or delete");
+  assert.equal(W.owns(v.path), null, "a watched folder's video isn't the Theatre's to move or delete");
   W.dropFolder(away);
   assert.ok(!W.list().shelves.includes("Movies"));
   assert.ok(fs.existsSync(path.join(away, "Films", "1999", "matrix.mkv")), "the folder stays where it was");
@@ -151,6 +151,15 @@ test("a shelf, or a show on one, added to another shelf; shelves renamed; where 
   assert.deepEqual(S.list().videos.map((x) => [x.shelf, x.folder]), [["Frozen", "Songs"]]);
   assert.throws(() => S.renameShelf("Frozen", "Kids"), /already/);
   assert.throws(() => S.addToShelf("Frozen", "../..", "Kids"), /Which folder/);
+  // characters Windows won't have in a folder name read the same, and a slash doesn't cut the name short
+  const odd = S.renameShelf("Frozen", 'Kids: "Frozen" & AC/DC?*');
+  assert.equal(odd.shelf, "Kids꞉ ＂Frozen＂ & AC∕DC？＊");
+  assert.ok(fs.existsSync(path.join(v, "Videos", odd.shelf)));
+  assert.deepEqual(S.list().videos.map((x) => x.shelf), [odd.shelf]);
+  assert.deepEqual(S.list().from, { [odd.shelf]: "Mia's Android phone" }, "where it came from follows the new name");
+  assert.deepEqual(S.renameShelf(odd.shelf, "Frozen"), { shelf: "Frozen" }, "and it can be renamed again by the name it shows");
+  assert.equal(S.mkShelf("con"), "con_", "a name Windows keeps for itself gets a mark");
+  assert.equal(S.mkShelf("Odds and ends. "), "Odds and ends", "a name can't end in a dot");
 });
 
 test("a show folder renamed where it is; collections follow", () => {
@@ -164,4 +173,48 @@ test("a show folder renamed where it is; collections follow", () => {
   assert.deepEqual(R.list().collections.find((x) => x.id === c.id).items, ["Kids/SpongeBob"]);
   assert.deepEqual(R.renameFolder("Kids", "SpongeBob/Season 1", "Season 01"), { folder: "SpongeBob/Season 01" });
   assert.throws(() => R.renameFolder("Kids", "../x", "y"), /Which folder/);
+});
+
+test("a whole video in one go is streamed in and filed, and a short one is kept to carry on", async () => {
+  const { Readable } = await import("node:stream");
+  const whole = { ...job, name: "whole.mp4" };
+  const end = await T.uploadWhole(whole, Readable.from([video.subarray(0, 1200), video.subarray(1200)]));
+  assert.equal(end.done, true);
+  assert.deepEqual(fs.readFileSync(end.path), video);
+  // the connection dropped partway: what arrived stays, so pieces can carry on from there
+  const cut = await T.uploadWhole({ ...job, name: "cut.mp4" }, Readable.from([video.subarray(0, 700)]));
+  assert.deepEqual(cut, { have: 700, done: false, path: null });
+  assert.deepEqual(T.uploadState({ ...job, name: "cut.mp4" }), { have: 700 });
+  await assert.rejects(T.uploadWhole({ ...job, name: "big.mp4", size: 10 }, Readable.from([video])), /more than the whole video/);
+});
+
+test("YouTube links: on a shelf with their title and thumbnail, moved, followed through a rename, and taken out", async () => {
+  const v = fs.mkdtempSync(path.join(os.tmpdir(), "theater-yt-"));
+  const Y = createTheater({ vaultDir: () => v });
+  let asked = 0;
+  const fake = async (u) => {
+    asked++;
+    return /oembed/.test(u) ? { ok: true, json: async () => ({ title: "Tide song", author_name: "Reef" }) } : { ok: true, arrayBuffer: async () => new Uint8Array([0xff, 0xd8, 9]).buffer };
+  };
+  await assert.rejects(Y.addLink("https://vimeo.com/1", "", fake), /isn't a YouTube/);
+  const a = await Y.addLink("https://youtu.be/dQw4w9WgXcQ?t=42", "", fake);
+  assert.equal(a.shelf, "YouTube");
+  const one = Y.list().videos.find((x) => x.id === a.id);
+  assert.equal(one.name, "Tide song");
+  assert.equal(one.author, "Reef");
+  assert.equal(one.start, 42);
+  assert.equal(one.thumb, 1, "its thumbnail is kept");
+  assert.ok(Y.list().shelves.includes("YouTube"));
+  const again = await Y.addLink("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "Music videos", fake);
+  assert.equal(again.again, true);
+  assert.equal(asked, 2, "added again: nothing asked of YouTube a second time");
+  assert.equal(Y.list().videos.find((x) => x.id === a.id).shelf, "Music videos");
+  Y.moveTo(one.path, "YouTube");
+  assert.equal(Y.list().videos.find((x) => x.id === a.id).shelf, "YouTube");
+  Y.renameShelf("YouTube", "Clips: best");
+  assert.equal(Y.list().videos.find((x) => x.id === a.id).shelf, "Clips꞉ best", "a renamed shelf keeps its links");
+  Y.setFav(a.id, true);
+  Y.dropLink(a.id);
+  assert.equal(Y.list().videos.length, 0);
+  assert.equal(fs.existsSync(Y.thumbFile(a.id)), false);
 });

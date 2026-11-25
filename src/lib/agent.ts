@@ -3,7 +3,7 @@
 import { relFor, withRel } from "./people.ts";
 import type { Character } from "./characters.ts";
 import { desk, type OutsideMail } from "./store.ts";
-import { credential, explainError, listModels, pickModel, scopeOf, streamOnce, type Connection, type Turn } from "./model.ts";
+import { credential, explainError, listModels, pickModel, scopeOf, streamOnce, type Connection, type Turn, loadedWindow, modelWindow } from "./model.ts";
 import { allowed, blockedBecause } from "./privacy.ts";
 import { memoryForPrompt } from "./vecmem.ts";
 import { catsNote } from "./cats.ts";
@@ -25,22 +25,28 @@ import { addJournal, describeCall, gameToolsFor, runTool, toolsFor, type Scope }
 import { speak, stopSpeaking } from "./voice.ts";
 import { aiFor, voiceFor } from "./prefs.ts";
 import type { TurnCtx } from "./tools.ts";
-import { bridge } from "./xdc.ts";
+import { aiAddr, bridge, library } from "./xdc.ts";
+import { myAddrName, myName, shownName } from "./myName.ts";
 import { fileInInbox, joinedApps } from "./messengers.ts";
 import { gameScreen } from "./bus.ts";
+import { turnNow, wakes, type Turn as GameTurn } from "./turns.ts";
+import { loadPlans, plansLine } from "./plans.ts";
+import { findThreads, maybePuzzle, nextFlag, passOver, readWatcher, watcherLine, WATCHER_FILE } from "./watcher.ts";
 import type { Role } from "./flood.ts";
 import { currentChat } from "./chats.ts";
 import { compact, shouldCompact } from "./context.ts";
 import { fitTurns, isCtxError, learnLimit, learnedLimit, sizeOf } from "./ctxfit.ts";
 import { missedNote, missedTool } from "./missedTool.ts";
-import { CLAIM_NOTE, claimsTool } from "./deskRecord.ts";
+import { ACT_NOTE, CLAIM_NOTE, MOVE_NOTE, SAY_NOTE, claimsMove, claimsTool, claimsWorld, saidNothing, stripRecords, toldNote } from "./deskRecord.ts";
 import { bookFor, bookHeader, parseScene, redactKeys, sceneText } from "./storybook.ts";
 import { allKeyValues, envFor } from "./residentKeys.ts";
 import { isLimitError, recordLimit, recordUsage } from "./meter.ts";
 import type { UsageKind } from "./meterCore.ts";
 import { record } from "./trajectories.ts";
+import { isSeatView, shrinkOlderViews } from "./seatViews.ts";
+import { DEFAULT_WINDOW, PLAY_STEPS, RUNAWAY_NOTE, WRAP_STEPS, playNote, runaway, timeToWrap, wrapNote } from "./playRoom.ts";
 import { fserveOn, parseCommand, serveCommand } from "./fserve.ts";
-import { isImage, splitThink, type Attachment, type ToolUse } from "./room.ts";
+import { isImage, promptParts, splitThink, type Attachment, type PromptContext, type ToolUse } from "./room.ts";
 
 let controller: AbortController | null = null;
 let running = false;
@@ -59,7 +65,11 @@ export function stopAll() {
   stopSpeaking();
 }
 
+/** How often streamed text reaches the room while a reply is being written. */
+const STREAM_MS = 150;
+
 function setBusy(id: string, what: string | null) {
+  if ((desk().busy[id] ?? null) === what) return; // unchanged: every store change re-saves the desk, so skip it
   const busy = { ...desk().busy };
   if (what) busy[id] = what;
   else delete busy[id];
@@ -67,7 +77,7 @@ function setBusy(id: string, what: string | null) {
 }
 
 /** A connection's key: the character's own first (residentKeys.ts), then the household's. */
-function keyFor(c: Connection, charId?: string) {
+export function keyFor(c: Connection, charId?: string) {
   return credential(c, envFor(charId));
 }
 
@@ -80,6 +90,10 @@ const PARALLEL = new Set(["web_search", "web_fetch", "notes_search", "note_read"
  */
 /** What a tool call sent and got back, for the reply's tool rows: trimmed, with every key value blanked. */
 const shownArgs = (args: Record<string, unknown>) => redactKeys(JSON.stringify(args, null, 1), allKeyValues()).slice(0, 800);
+/** What a character sees and does on her own seat is as private as a person's own screen (a secret word, a hand of
+ *  cards): the room's tool rows say she used it, not what was there. */
+const seatPrivate = (charId: string, name: string) => name === "game_seat_act" || (name === "game_screen" && gameScreen.hasSeat(charId));
+const PRIVATE_OUT = "(her own screen: private, as a person's own screen is)";
 const shownOut = (text: string) => {
   const t = redactKeys(text, allKeyValues());
   return t.length > 1600 ? `${t.slice(0, 1600)}
@@ -87,14 +101,55 @@ const shownOut = (text: string) => {
 };
 
 const UNSAID_NOTE = "[Desk note] Your answer stayed in your thinking, so nobody saw it. Say it here if you meant to.";
+const SILENT_NOTE = "[Desk note] Your tools ran, but you haven't said anything, so the room only sees the tool rows. Say a short line about what you did (no need to run them again).";
 const SEEN = "[Your browser tab, as it looks now]";
 const SEEN_BEFORE = "[An earlier picture of your browser tab]";
 const REST_MS = 3 * 60_000;
 const resting = new Map<string, number>();
 const isResting = (id: string) => (resting.get(id) ?? 0) > Date.now();
 
+const secs = (ms: number) => (ms >= 10_000 ? `${Math.round(ms / 1000)} s` : `${(ms / 1000).toFixed(1)} s`);
+/** "read 3,200 tokens in 41 s, wrote 120 at 6.1/s" (and the load, when the model had to be loaded first), over a turn's
+ *  steps: how hard the computer running the model worked for this reply. */
+export function paceLine(paces: { loadMs: number; readMs: number; writeMs: number; prompt: number; output: number }[]) {
+  if (!paces.length) return "";
+  const t = paces.reduce((a, p) => ({ loadMs: a.loadMs + p.loadMs, readMs: a.readMs + p.readMs, writeMs: a.writeMs + p.writeMs, prompt: a.prompt + p.prompt, output: a.output + p.output }));
+  const rate = t.writeMs ? (t.output / (t.writeMs / 1000)).toFixed(1) : "?";
+  return ` · ${t.loadMs > 1500 ? `loaded in ${secs(t.loadMs)}, ` : ""}read ${t.prompt.toLocaleString()} tokens in ${secs(t.readMs)}, wrote ${t.output.toLocaleString()} at ${rate}/s${paces.length > 1 ? ` (${paces.length} steps)` : ""}`;
+}
+
+/** Jade's watcher, when its owner has switched it on: the flag that glows now and any puzzle waiting, as a line in her
+ *  own turn (lib/watcher.ts). Off as soon as she isn't in the room. Nothing runs by itself. */
+function watcherTurn(id: string, inRoom: boolean) {
+  const s = desk();
+  const files = s.filesOf(id);
+  let w = readWatcher(files);
+  if (!w.on) return "";
+  if (!inRoom) {
+    s.writeFile(id, WATCHER_FILE, JSON.stringify({ ...w, on: false }, null, 1));
+    return "";
+  }
+  const threads = findThreads(files);
+  w = passOver(w);
+  const f = nextFlag(w, threads);
+  const p = maybePuzzle(f.state, threads);
+  s.writeFile(id, WATCHER_FILE, JSON.stringify(p.state, null, 1));
+  const line = watcherLine(f.flag, p.puzzle);
+  return line ? `
+
+${line}` : "";
+}
+
+/** Whether her first model runs on a computer here (this one, or one on the network) rather than online: Ollama's
+ *  ":cloud" models run online even when reached through a computer on the network. */
+export function leanModel(charId: string) {
+  const first = chainFor(charId).list[0];
+  if (!first) return false;
+  return scopeOf(first.conn.baseUrl) !== "cloud" && !/[:-]cloud$/i.test(first.model);
+}
+
 /** Connections to try for this character, in order, with the reason any were skipped. */
-export function chainFor(charId: string, helper = false): { list: { conn: Connection; model: string }[]; skipped: string[] } {
+export function chainFor(charId: string, helper = false, playing = false): { list: { conn: Connection; model: string }[]; skipped: string[] } {
   const s = desk();
   const pref = s.charPrefs[charId];
   const conns = s.model.connections;
@@ -115,6 +170,13 @@ export function chainFor(charId: string, helper = false): { list: { conn: Connec
   const help = helper && pref?.helper?.connection ? conns.find((x) => x.id === pref.helper!.connection && x.enabled) : undefined;
   if (help) {
     const first = { conn: help, model: pref!.helper!.model || help.model };
+    picked.splice(0, picked.length, first, ...picked.filter((p) => !(p.conn.id === first.conn.id && p.model === first.model)));
+  }
+  // seated in a game or app, her playing model goes first, when she has one: a model that takes actions well, where
+  // her usual one may be chosen for conversation or roleplay (Jade: a 27B to play, her 32B to talk)
+  const play = playing && !helper && pref?.player?.connection ? conns.find((x) => x.id === pref.player!.connection && x.enabled) : undefined;
+  if (play) {
+    const first = { conn: play, model: pref!.player!.model || play.model };
     picked.splice(0, picked.length, first, ...picked.filter((p) => !(p.conn.id === first.conn.id && p.model === first.model)));
   }
   const skipped: string[] = [];
@@ -194,10 +256,16 @@ async function takeTurn(me: Character, opts: TurnOpts): Promise<TurnResult> {
   const history = opts.history ?? s.messages;
   // A compacted chat sends its summary instead of the messages it covers (not for bridge chats or ended chats).
   const meta = !opts.history ? currentChat() : undefined;
-  const people = [s.session ?? (s.accounts.length ? "a guest" : "")].filter(Boolean);
+  const people = [myName() || (s.accounts.length ? "a guest" : "")].filter(Boolean);
   const g = s.game;
   const playing = Boolean(g && g.players.includes(me.id));
-  const screen = playing ? await gameScreen.read() : "";
+  // a model running on a computer here (not a cloud one) reads every word of its prompt slowly: while she plays, it gets
+  // a shorter screen, a shorter guide and fewer of the room's messages
+  const leanHere = leanModel(me.id); // (her model runs on a computer here: every word of the prompt costs it time)
+  const lean = playing && leanHere;
+  const screen = playing ? (await gameScreen.read(me.id)).slice(0, lean ? 1500 : 6000) : "";
+  // a game turn has the guide in its instruction; any other turn while she's playing gets it here
+  const guide = playing && !opts.game && g ? (await gameGuide(g.slug, g.kind === "xdc" ? g.pkgId : undefined)).slice(0, lean ? 2500 : 6000) : "";
   const bridge = opts.replyTo?.bridge && opts.replyTo.source !== "desk" ? { ...opts.replyTo.bridge, source: opts.replyTo.source as "discord" | "vector" } : undefined;
   const ctx: TurnCtx = {
     charId: me.id,
@@ -211,6 +279,7 @@ async function takeTurn(me: Character, opts: TurnOpts): Promise<TurnResult> {
   };
   // the People layer: names for whoever the turn is with (the bridge's own person, or who's signed in here)
   const rel = bridge ? relFor(s.bridges[bridge.source].owner, s.bridges[bridge.source].ownerName) : relFor(s.session ?? "", s.session ?? "");
+  let promptCtx: PromptContext | null = null; // (the room's own prompt, when it is one: see the lean note below)
   const sys0 = bridge && opts.scope !== "locksmith"
     ? scopedPrompt({
         me,
@@ -222,24 +291,33 @@ async function takeTurn(me: Character, opts: TurnOpts): Promise<TurnResult> {
         archive: bridge.source === "discord" ? s.bridges.discord.archiveName : undefined,
         now: new Date(),
       })
-    : systemPrompt({
-    me,
-    files: s.filesOf(me.id),
-    room: room.some((c) => c.id === me.id) ? room : [...room, me],
-    people,
-    game: g && playing ? { title: g.title, players: g.players.map((p) => s.character(p)?.short ?? p), screen, xdc: g.kind === "xdc" } : undefined,
-    now: new Date(),
-    length: aiFor(me.id).length,
-    summary: meta?.summary,
-    skillRouter: s.chat.skillRouter,
-    memoryFocus: await focusFor(me.id, history),
-    around: catsNote(s.cats.list, s.cats.on),
-  });
-  const sys = withRel(sys0, rel);
+    : systemPrompt(
+        (promptCtx = {
+          me,
+          files: s.filesOf(me.id),
+          room: room.some((c) => c.id === me.id) ? room : [...room, me],
+          people,
+          game: g && playing ? { title: g.title, players: g.players.map((p) => s.character(p)?.short ?? p), screen, xdc: g.kind === "xdc", guide } : undefined,
+          now: new Date(),
+          length: aiFor(me.id).length,
+          summary: meta?.summary,
+          skillRouter: s.chat.skillRouter,
+          memoryFocus: await focusFor(me.id, history),
+          around: catsNote(s.cats.list, s.cats.on),
+          apart: leanHere,
+        }),
+      );
+  // A model on a computer here: the system prompt (and the tools Ollama puts after it) stays the same from turn to
+  // turn, so it can reuse its reading of them; what changes (memory for this moment, who's here, the time, her
+  // watcher) comes as a note at the start of the conversation instead.
+  const watch = opts.silent ? "" : watcherTurn(me.id, room.some((c) => c.id === me.id));
+  const moment = promptCtx && leanHere ? [promptParts({ ...promptCtx, apart: false }).moment, watch.trim()].filter(Boolean).join("\n\n") : "";
+  const sys = withRel(sys0, rel) + (moment ? "" : watch);
   const base: Turn[] = [
     { role: "system", content: sys },
+    ...(moment ? [{ role: "user" as const, content: `[Desk note: this moment, for you alone; not something anyone said]\n${moment}` }] : []),
     // a game turn reads only the last few lines, so the game (and its guide) isn't drowned out by the chat
-    ...transcriptFor(me, history, opts.game ? Math.min(6, s.chat.historyLimit) : s.chat.historyLimit, bridge?.chatId, { stamp: s.chat.stampTimes, after: bridge ? undefined : meta?.summaryUpTo }),
+    ...transcriptFor(me, history, opts.game ? Math.min(lean ? 4 : 6, s.chat.historyLimit) : leanHere ? Math.min(lean ? 10 : 12, s.chat.historyLimit) : s.chat.historyLimit, bridge?.chatId, { stamp: s.chat.stampTimes, after: bridge ? undefined : meta?.summaryUpTo }),
   ];
   if (opts.images?.length) {
     const lastUser = [...base].reverse().find((t) => t.role === "user");
@@ -255,7 +333,7 @@ async function takeTurn(me: Character, opts: TurnOpts): Promise<TurnResult> {
   if (opts.nudge) base.push({ role: "user", content: TURN_NUDGE });
   if (opts.instruction) base.push({ role: "user", content: opts.instruction });
 
-  const { list, skipped } = chainFor(me.id, opts.helper);
+  const { list, skipped } = chainFor(me.id, opts.helper, playing && !bridge);
   if (!list.length) {
     const why = skipped.length ? skipped.join(" ") : "No AI connection is set up yet. Open Settings → AI.";
     if (!opts.silent) s.post({ kind: "notice", who: "desk", name: "Desk", text: `${me.short} can't answer. ${why}`, source: "desk", error: true });
@@ -263,11 +341,28 @@ async function takeTurn(me: Character, opts: TurnOpts): Promise<TurnResult> {
   }
 
   const msgId = opts.silent ? "" : s.post({ kind: "character", who: me.id, name: me.short, text: "", source: opts.replyTo?.source ?? "desk", bridge: opts.replyTo?.bridge });
-  const patch = (p: Partial<Message>) => msgId && desk().patchMessage(msgId, p);
+  // Streaming pieces arrive a token at a time, and every message change re-saves the whole desk and redraws the chat:
+  // over a long think that froze the window until it crashed. So streamed text lands at most every STREAM_MS; any
+  // other patch (the reply's final text, its tools) takes what's waiting first, so nothing lands out of order.
+  let waiting: Partial<Message> | null = null;
+  let waitTimer = 0;
+  const patch = (p: Partial<Message>) => {
+    if (waitTimer) window.clearTimeout(waitTimer);
+    waitTimer = 0;
+    const all = waiting ? { ...waiting, ...p } : p;
+    waiting = null;
+    if (msgId) desk().patchMessage(msgId, all);
+  };
+  const streamPatch = (p: Partial<Message>) => {
+    waiting = { ...(waiting ?? {}), ...p };
+    if (!waitTimer) waitTimer = window.setTimeout(() => patch({}), STREAM_MS);
+  };
   setBusy(me.id, "thinking");
   let lastErr = "";
 
   for (const { conn, model: wanted } of list) {
+    // how the computer running the model kept up, step by step (Ollama on this computer or one on the network)
+    const paces: { loadMs: number; readMs: number; writeMs: number; prompt: number; output: number }[] = [];
     let shown = "";
     const used: NonNullable<Message["tools"]> = [];
     try {
@@ -276,6 +371,7 @@ async function takeTurn(me: Character, opts: TurnOpts): Promise<TurnResult> {
       const ai = aiFor(me.id);
       let tools = ai.tools ? (opts.game ? gameToolsFor() : toolsFor(ctx)) : [];
       const turns = [...base];
+      const turnFrom = turns.length; // (where this turn's own messages begin)
       const ctxKey = `${conn.id}:${model}`;
       const toolsJson = () => (tools.length ? JSON.stringify(tools) : "");
       const known = learnedLimit(ctxKey);
@@ -284,28 +380,68 @@ async function takeTurn(me: Character, opts: TurnOpts): Promise<TurnResult> {
       let noteGiven = false;
       let heardGiven = false;
       let claimGiven = false;
+      let sayGiven = false;
+      let moveGiven = false;
       let final = "";
       let thought = "";
-      for (let step = 0; step <= ai.maxSteps; step++) {
+      // on a game seat, her turn runs on her room, not a few actions: she plays on until her context is nearly
+      // full, then gets safe and says where she is and what's next (playRoom.ts)
+      const seated = playing && tools.some((t) => t.name === "game_seat_act");
+      const sizes = seated ? [s.chat.numCtx, learnedLimit(ctxKey), await modelWindow(conn, keyFor(conn, me.id), model)].filter((n): n is number => typeof n === "number" && n > 0) : [];
+      let playWindow = sizes.length ? Math.min(...sizes) : DEFAULT_WINDOW; // (the smallest of what's chosen, learned and said)
+      let windowChecked = !seated; // (after her first step the model is loaded, and its real window can be asked)
+      let maxSteps = seated ? PLAY_STEPS : ai.maxSteps;
+      let wrapGiven = false;
+      let runaways = 0;
+      let truthGiven = false;
+      // (on the end of what she's answering, not a message of its own: two in a row tangle some models' templates)
+      if (seated) {
+        const last = turns[turns.length - 1];
+        if (last && last.role === "user" && typeof last.content === "string") turns[turns.length - 1] = { ...last, content: `${last.content}\n\n${playNote(playWindow)}` };
+        else turns.push({ role: "user", content: playNote(playWindow) });
+      }
+      for (let step = 0; step <= maxSteps; step++) {
         let streamed = "";
         let reasoning = "";
         let result;
+        // on a game seat, a reply that narrates play instead of playing is cut off as it streams (playRoom.ts)
+        const stepCtrl = new AbortController();
+        const passOn = () => stepCtrl.abort();
+        signal.addEventListener("abort", passOn, { once: true });
+        let ranAway = false;
         try {
-          result = await streamOnce(conn, model, keyFor(conn, me.id), turns, step < ai.maxSteps ? tools.map((t) => ({ ...t, description: withRel(t.description, rel) })) : [], ai.temperature, (piece) => {
+          result = await streamOnce(conn, model, keyFor(conn, me.id), turns, step < maxSteps ? tools.map((t) => ({ ...t, description: withRel(t.description, rel) })) : [], ai.temperature, (piece) => {
             streamed += piece;
+            if (seated && !ranAway && step < maxSteps && runaway(streamed)) {
+              ranAway = true;
+              stepCtrl.abort();
+              return;
+            }
             const parts = splitThink(shown + streamed);
             setBusy(me.id, parts.text.trim() ? "typing" : "thinking");
-            patch({ text: tidyReply(me, shown + streamed, room), thinking: [thought, reasoning, parts.thinking].filter(Boolean).join("\n\n") || undefined });
-          }, signal, {
+            streamPatch({ text: tidyReply(me, shown + streamed, room), thinking: [thought, reasoning, parts.thinking].filter(Boolean).join("\n\n") || undefined });
+          }, stepCtrl.signal, {
             numCtx: s.chat.numCtx || undefined,
             think: (s.charPrefs[me.id]?.think ?? s.chat.askThink) && conn.kind === "ollama",
             onThink: (piece) => {
               reasoning += piece;
               setBusy(me.id, "thinking");
-              patch({ thinking: [thought, reasoning].filter(Boolean).join("\n\n") });
+              streamPatch({ thinking: [thought, reasoning].filter(Boolean).join("\n\n") });
             },
           });
         } catch (e) {
+          if (ranAway && !signal.aborted) {
+            // what she wrote is dropped from the room's view (it didn't happen); she hears why, and plays on. Twice in
+            // a turn, and the turn ends with her words instead.
+            runaways++;
+            streamPatch({ text: tidyReply(me, shown, room) });
+            used.push({ name: "reply", ok: false, note: "wrote out play instead of playing: stopped", out: RUNAWAY_NOTE, desk: true });
+            patch({ tools: [...used] });
+            turns.push({ role: "assistant", content: `${splitThink(streamed).text.slice(0, 300).trim() || "(described moves)"} …` });
+            turns.push({ role: "user", content: RUNAWAY_NOTE });
+            if (runaways >= 2) maxSteps = Math.min(maxSteps, step + 1);
+            continue;
+          }
           if ((e as { noTools?: boolean }).noTools && tools.length) {
             tools = [];
             step--;
@@ -324,11 +460,33 @@ async function takeTurn(me: Character, opts: TurnOpts): Promise<TurnResult> {
           throw e;
         }
         recordUsage(me.id, kindOf(opts), conn.label, result.usage);
+        if (!windowChecked) {
+          windowChecked = true;
+          const loaded = await loadedWindow(conn, keyFor(conn, me.id), model);
+          if (loaded && loaded < playWindow) playWindow = loaded; // (loaded smaller than its file allows: that's her real room)
+        }
+        if (result.usage?.pace) paces.push({ ...result.usage.pace, prompt: result.usage.prompt, output: result.usage.output });
         thought = [thought, result.thinking.trim()].filter(Boolean).join("\n\n");
+        // her last step is for words: a tool asked for anyway (no tools were offered) isn't run, and she's told so,
+        // once, with one more step to say what she did (Dee in Vexel, 2026-11-20: every turn ended in an action)
+        if (step >= maxSteps && result.toolCalls.length && !sayGiven) {
+          sayGiven = true;
+          const LAST = seated
+            ? "[Desk note] That's all the actions for this turn, so that last one wasn't taken. Now say, in words, where you are (x, y, z, from your screen), what you did this turn, and what you'll do next turn."
+            : "[Desk note] That's all the actions for this turn, so that last one wasn't taken. Now say, in a line or two, what you did and what happened (only what your screen showed). You can carry on next turn.";
+          used.push({ name: "reply", ok: false, note: "out of actions: asked for her words", out: LAST, desk: true });
+          patch({ tools: [...used] });
+          turns.push({ role: "assistant", content: result.text || "(asked for another action)" });
+          turns.push({ role: "user", content: LAST });
+          tools = [];
+          step--;
+          continue;
+        }
+        if (step >= maxSteps && result.toolCalls.length) result.toolCalls = []; // (still no: her words, whatever they are)
         if (!result.toolCalls.length) {
           // she meant to call a tool and didn't: the desk says so plainly, once a turn, and she goes on from there
           const parts = splitThink(result.text);
-          const missed = !noteGiven && step < ai.maxSteps ? missedTool(`${result.thinking}\n${parts.thinking}`, parts.text, tools.map((t) => t.name)) : null;
+          const missed = !noteGiven && step < maxSteps ? missedTool(`${result.thinking}\n${parts.thinking}`, parts.text, tools.map((t) => t.name)) : null;
           // her whole answer stayed inside her thinking (a model that never closed it): nobody saw it, so the desk says so
           const unsaid = !missed && !heardGiven && !opts.nudge && !parts.text.trim() && `${result.thinking}${parts.thinking}`.trim().length > 40;
           if (unsaid) {
@@ -337,10 +495,27 @@ async function takeTurn(me: Character, opts: TurnOpts): Promise<TurnResult> {
             patch({ tools: [...used] });
             turns.push({ role: "assistant", content: result.text });
             turns.push({ role: "user", content: UNSAID_NOTE });
+            // (on her last step too: she still gets one, without tools, to say it)
+            if (step >= maxSteps) {
+              tools = [];
+              step--;
+            }
+            continue;
+          }
+          // tools ran (a move sent, say) and then she stopped with nothing said at all, thinking included: the room only
+          // sees a row of tools. The desk asks once for a line about it (k2.7-code in Logic Garden, 2026-11-19)
+          const silent =
+            !missed && playing && !heardGiven && !opts.nudge && step < maxSteps && !parts.text.trim() && !shown.trim() && used.some((u) => !u.desk);
+          if (silent) {
+            heardGiven = true;
+            used.push({ name: "reply", ok: false, note: "acted without a word", out: SILENT_NOTE, desk: true });
+            patch({ tools: [...used] });
+            turns.push({ role: "assistant", content: result.text });
+            turns.push({ role: "user", content: SILENT_NOTE });
             continue;
           }
           // she describes using a tool, and none ran in this reply: the desk says so, once, and her words stay shown
-          const claimed = !missed && !claimGiven && step < ai.maxSteps && tools.length > 0 && !used.some((u) => !u.desk) && claimsTool(parts.text);
+          const claimed = !missed && !claimGiven && step < maxSteps && tools.length > 0 && !used.some((u) => !u.desk) && claimsTool(parts.text);
           if (claimed) {
             claimGiven = true;
             used.push({ name: "reply", ok: false, note: "described tool use, but no tool ran", out: CLAIM_NOTE, desk: true });
@@ -352,6 +527,38 @@ async function takeTurn(me: Character, opts: TurnOpts): Promise<TurnResult> {
             turns.push({ role: "user", content: CLAIM_NOTE });
             continue;
           }
+          // a move in the open game told in words, with none sent: the desk says the game hasn't changed, once, and she
+          // can send it (her words stay shown)
+          const toldMove =
+            !moveGiven && playing && g?.kind === "xdc" && step < maxSteps && tools.some((t) => t.name === "app_send_update") && !used.some((u) => u.name === "app_send_update") && claimsMove(parts.text);
+          // the same in a game she plays on her own seat (an adapter's actions): a world told, not touched
+          const toldAct =
+            !toldMove && !moveGiven && playing && step < maxSteps && tools.some((t) => t.name === "game_seat_act") && !used.some((u) => u.name === "game_seat_act") && (claimsWorld(parts.text) || claimsMove(parts.text));
+          if (!missed && (toldMove || toldAct)) {
+            moveGiven = true;
+            used.push({ name: "reply", ok: false, note: toldAct ? "told what she did, did none of it" : "told a move, sent none", out: toldAct ? ACT_NOTE : MOVE_NOTE, desk: true });
+            if (parts.text.trim()) shown += `${parts.text.trim()}\n\n`;
+            patch({ tools: [...used] });
+            turns.push({ role: "assistant", content: result.text });
+            turns.push({ role: "user", content: toldAct ? ACT_NOTE : MOVE_NOTE });
+            continue;
+          }
+          // on her seat, her words weighed against what ran (one click, then a whole chapter "completed"): her own
+          // quick-decisions model judges, once a turn, and she hears what really ran (decide.ts)
+          if (!missed && seated && !truthGiven && step < maxSteps && parts.text.trim().length > 80) {
+            truthGiven = true;
+            const ran = used.filter((u) => !u.desk).map((u) => `${u.note}${u.args ? ` ${String(u.args).replace(/\s+/g, " ").slice(0, 120)}` : ""}`).slice(-12);
+            const more = await import("./decide.ts").then((d) => d.toldMoreThanRan(me.id, parts.text, ran)).catch(() => false);
+            if (more) {
+              const note = toldNote(ran);
+              used.push({ name: "reply", ok: false, note: "told more than she did", out: note, desk: true });
+              if (parts.text.trim()) shown += `${parts.text.trim()}\n\n`;
+              patch({ tools: [...used] });
+              turns.push({ role: "assistant", content: result.text });
+              turns.push({ role: "user", content: note });
+              continue;
+            }
+          }
           if (missed) {
             noteGiven = true;
             used.push({ name: missed, ok: false, note: `meant to use ${missed}, didn't call it`, out: missedNote(missed), desk: true });
@@ -360,6 +567,19 @@ async function takeTurn(me: Character, opts: TurnOpts): Promise<TurnResult> {
             patch({ tools: [...used] });
             turns.push({ role: "assistant", content: result.text });
             turns.push({ role: "user", content: missedNote(missed) });
+            continue;
+          }
+          // tools ran and then she said nothing at all (some models do, once the tools are put away): the desk asks her,
+          // once, to say it in words, and she gets one more step without tools to do it
+          // (an imitation of the desk's own record is taken out of a reply later, so it counts as nothing said)
+          if (!sayGiven && !signal.aborted && saidNothing(stripRecords(parts.text), `${result.thinking}${parts.thinking}`, used.filter((u) => !u.desk).length)) {
+            sayGiven = true;
+            used.push({ name: "reply", ok: false, note: "tools ran, then no words", out: SAY_NOTE, desk: true });
+            patch({ tools: [...used] });
+            turns.push({ role: "assistant", content: result.text });
+            turns.push({ role: "user", content: SAY_NOTE });
+            tools = [];
+            if (step >= maxSteps) step--; // the last step was this one: she still gets hers
             continue;
           }
           final = shown + result.text;
@@ -378,19 +598,30 @@ async function takeTurn(me: Character, opts: TurnOpts): Promise<TurnResult> {
           setBusy(me.id, group.length > 1 ? `${describeCall(group[0].name, group[0].args)} and ${group.length - 1} more` : describeCall(group[0].name, group[0].args));
           // each call shows as it starts, and fills in (✓ or ✗, how long, what came back) as it ends
           const from = used.length;
-          for (const call of group) used.push({ name: call.name, ok: true, note: describeCall(call.name, call.args), args: shownArgs(call.args), running: true });
+          for (const call of group) used.push({ name: call.name, ok: true, note: describeCall(call.name, call.args), args: seatPrivate(me.id, call.name) ? shownArgs({ do: call.args.do, target: call.args.target }) : shownArgs(call.args), running: true });
           patch({ tools: [...used] });
           const outs = await Promise.all(
             group.map(async (call, k) => {
               const t0 = Date.now();
               const out = await runTool(tools, ctx, call.name, call.args);
-              used[from + k] = { ...used[from + k], ok: out.ok, out: shownOut(out.text), ms: Date.now() - t0, running: false };
+              used[from + k] = { ...used[from + k], ok: out.ok, out: seatPrivate(me.id, call.name) ? PRIVATE_OUT : shownOut(out.text), ms: Date.now() - t0, running: false };
               patch({ tools: [...used] });
               return out;
             }),
           );
+          // a new view of her game seat: the older ones this turn shrink to their first lines (she sees the screen as it is now)
+          if (group.some((call) => isSeatView(call.name))) shrinkOlderViews(turns, turnFrom);
           group.forEach((call, k) => turns.push({ role: "tool", content: outs[k].text.slice(0, 12000), callId: call.id, name: call.name }));
           i = j;
+        }
+        // her room's nearly full: once, she's told to get safe and say where she is, with a few actions left for it
+        if (seated && !wrapGiven && timeToWrap(Math.max(result.usage?.prompt ?? 0, sizeOf(turns, toolsJson())), playWindow)) {
+          wrapGiven = true;
+          const note = wrapNote(Math.max(result.usage?.prompt ?? 0, sizeOf(turns, toolsJson())), playWindow);
+          used.push({ name: "reply", ok: true, note: "room nearly full: get safe, then say where", out: note, desk: true });
+          patch({ tools: [...used] });
+          turns.push({ role: "user", content: note });
+          maxSteps = Math.min(maxSteps, step + WRAP_STEPS);
         }
         // what a tool showed her (her browser tab) comes as a picture after the results; only the newest stays a
         // picture, so the conversation doesn't fill up with old ones
@@ -404,8 +635,9 @@ async function takeTurn(me: Character, opts: TurnOpts): Promise<TurnResult> {
       }
       const text = tidyReply(me, final, room);
       const pass = isPass(text) || (!text && !used.length);
-      const thinking = [thought, splitThink(final).thinking].filter(Boolean).join("\n\n").trim();
-      patch({ text: pass ? "" : text, pass, via: `${conn.label} · ${model}`, tools: used.length ? used : undefined, thinking: thinking || undefined });
+      // (a turn where she used her own seat's controls keeps her thinking to herself: it may hold her secret)
+      const thinking = used.some((u) => u.name === "game_seat_act") ? "" : [thought, splitThink(final).thinking].filter(Boolean).join("\n\n").trim();
+      patch({ text: pass ? "" : text, pass, via: `${conn.label} · ${model}${paceLine(paces)}`, tools: used.length ? used : undefined, thinking: thinking || undefined });
       resting.delete(conn.id);
       setBusy(me.id, null);
       if (msgId && !pass)
@@ -564,7 +796,7 @@ export async function say(text: string, from?: string, extra: { files?: Attachme
   if (!clean && !extra.files?.length) return;
   const role = from ? "keyholder" : s.role();
   const blocked = s.weigh(clean || "(files)", "desk", role);
-  const name = from ?? s.session ?? "You";
+  const name = from ?? shownName();
   const id = s.post({ kind: "human", who: from ? `api:${from}` : s.session ?? "you", name, text: clean, source: "desk", files: extra.files?.length ? extra.files : undefined });
   if (blocked) {
     s.notice(blocked);
@@ -572,6 +804,20 @@ export async function say(text: string, from?: string, extra: { files?: Attachme
   }
   const msg = desk().messages.find((m) => m.id === id);
   if (msg) await respond(msg, extra.instruction);
+}
+
+/** Words for the players of the open game (the game window's chat): posted in the room like anything said, and
+ *  answered as a game turn, so the players have the game's tools and guide in hand and make their moves rather than
+ *  telling them. With no game open it's an ordinary message. */
+export async function sayToPlayers(text: string) {
+  const s = desk();
+  const clean = text.trim();
+  if (!clean) return;
+  if (!s.game?.players.length) return say(clean);
+  const blocked = s.weigh(clean, "desk", s.role());
+  s.post({ kind: "human", who: s.session ?? "you", name: shownName(), text: clean, source: "desk" });
+  if (blocked) return s.notice(blocked);
+  await gameTurn();
 }
 
 /** The latest reply again: drop what the characters said since your last message and ask once more. */
@@ -653,20 +899,30 @@ let wakeTimer = 0;
 bridge.watch((scope, row) => {
   const s = desk();
   const g = s.game;
-  if (!g || g.kind !== "xdc" || g.scope !== scope || !row.from.startsWith("you:")) return;
+  if (!g || g.kind !== "xdc" || g.scope !== scope || !g.players.length) return;
+  // the game naming a character's turn (webxdc notify) wakes her, whoever sent it; otherwise a person's move does,
+  // when waking is on for this app
   const prefs = s.appPrefs[`xdc:${g.slug}`] ?? {};
-  if (!(prefs.wake ?? g.slug === "jade-link") || !g.players.length) return;
+  if (!wakes(row, g.players, (id) => aiAddr(id, scope)) && !(row.from.startsWith("you:") && (prefs.wake ?? g.slug === "jade-link"))) return;
+  // (a wake that comes while someone's turn is still running waits for the room to be free, rather than being lost:
+  // a game often names the next player while the last one is still talking)
   window.clearTimeout(wakeTimer);
-  wakeTimer = window.setTimeout(() => {
-    if (!running) void gameTurn();
-  }, 1500);
+  let tries = 0;
+  const tryTurn = () => {
+    if (!running) return void gameTurn();
+    if (++tries < 150) wakeTimer = window.setTimeout(tryTurn, 2000);
+  };
+  wakeTimer = window.setTimeout(tryTurn, 1500);
 });
 
 /** How to play a game, for the characters: a guide in the vault (Games/guides/<game>.md, which people and characters
  *  can write and improve), else one that comes with the desktop (public/game-guides/), else nothing. */
-export async function gameGuide(slug: string): Promise<string> {
+export async function gameGuide(slug: string, pkgId?: string): Promise<string> {
   const name = `${slug.replace(/[^\w.-]+/g, "-").toLowerCase()}.md`;
-  for (const url of [`/api/vault/file?path=${encodeURIComponent(`Games/guides/${name}`)}`, `/game-guides/${name}`]) {
+  // the vault's guide first (yours to change), then the built-in one, then the guide a made game carries itself
+  const urls = [`/api/vault/file?path=${encodeURIComponent(`Games/guides/${name}`)}`, `/game-guides/${name}`];
+  if (pkgId) urls.push(`/api/xdc/${encodeURIComponent(pkgId)}/file?path=guide.md`);
+  for (const url of urls) {
     const r = await fetch(url).catch(() => null);
     const text = r?.ok && !/html/i.test(r.headers.get("content-type") ?? "") ? (await r.text()).trim() : "";
     if (text) return text.slice(0, 6000);
@@ -681,20 +937,35 @@ export async function gameTurn() {
   if (s.flood.shut) return s.notice("The flood gate is shut, so the characters are resting.");
   const players = g.players.map((id) => s.character(id)).filter((c): c is Character => Boolean(c));
   if (!players.length) return s.notice("No characters are playing. Tap their names above the game to add them.");
-  const guide = await gameGuide(g.slug);
+  const guide = await gameGuide(g.slug, g.kind === "xdc" ? g.pkgId : undefined);
   const how = guide ? `\n\nHow to play it (the game's guide):\n${guide}` : "";
+  // whose turn the game says it is: only they open their eyes
+  const turn = g.kind === "xdc" && g.scope ? turnNow(await library.updates(g.scope, 0).catch(() => []), players.map((c) => c.id), (id) => aiAddr(id, g.scope)) : ({ kind: "open" } as GameTurn);
+  if (turn.kind === "waiting") {
+    const whose = turn.for.map((a) => (a === `you:${myAddrName()}` ? "your" : `${a.replace(/^(you|ai):/, "")}'s`));
+    return s.notice(`The characters wait with their eyes closed: it's ${whose.join(" and ")} turn.`);
+  }
+  const playing = turn.kind === "theirs" ? players.filter((c) => turn.mine.has(c.id)) : players;
+  // the plans on the table (Dee's soft commitments), for everyone playing to keep or change
+  const table = plansLine(await loadPlans(g.scope ?? g.slug));
+  const plans = table ? `
+
+Plans on the table (game_plan to add, revise, keep or cancel one):
+${table}` : "";
+  const secret = gameScreen.hasSeat(playing[0]?.id ?? "") ? " Your seat's screen is yours alone: no one else sees it, or what you type there with game_seat_act. Never say a secret (your word, your cards) out loud." : "";
   await withRun(async () => {
-    for (const c of players) {
+    for (const c of playing) {
+      const yours = turn.kind === "theirs" ? `\n[Your turn] The game says to you: "${turn.mine.get(c.id)}"` : "";
       if (controller?.signal.aborted) return;
-      // each player knows their own seat: first in the list plays first
-      const seat = `\nYou're player ${players.indexOf(c) + 1} of ${players.length}: ${players.map((p, i) => `${i + 1} ${p.short}`).join(", ")}.`;
+      // who's playing, in order; a seat is the game's to give: the person at the board may already hold one
+      const seat = `\nThe characters playing, in order: ${players.map((p, i) => `${i + 1} ${p.short}`).join(", ")}. In a game with seats, take a free one: the person at the board may already hold one (often the first), so check the state before you claim yours.`;
       await takeTurn(c, {
         scope: "locksmith",
         game: true,
         instruction:
           g.kind === "xdc"
-            ? `[Game] You're playing the Vector app "${g.title}" together, as a real player. Act first, talk after: start your reply with the tool call itself (app_updates to see the state; app_send_update to make your move when it's your turn), not with words about calling it. Once your move is sent, say one short, playful line about it.${seat}${how}`
-            : `[Game] You're playing "${g.title}" together. The game screen is described in your context. Say what you'd do next, or react to what's happening. Short and playful; the human has the controls.${how}`,
+            ? `[Game] You're playing the Vector app "${g.title}" together, as a real player. Act first, talk after: start your reply with the tool call itself (app_updates to see the state; app_send_update to make your move when it's your turn, or game_seat_act when the game asks you to type, click or choose on your own screen), not with words about calling it. Once your move is made, say one short, playful line about it.${secret}${seat}${yours}${plans}${leanModel(c.id) ? how.slice(0, 2600) : how}`
+            : `[Game] You're playing "${g.title}" together. The game screen is described in your context. Say what you'd do next, or react to what's happening. Short and playful; the human has the controls.${plans}${how}`,
       });
     }
   });

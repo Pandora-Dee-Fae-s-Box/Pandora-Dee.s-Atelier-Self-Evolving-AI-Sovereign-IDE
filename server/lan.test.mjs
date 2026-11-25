@@ -24,8 +24,8 @@ test("the ARP table, without multicast and broadcast", () => {
 });
 
 test("a computer's name from nbtstat", () => {
-  const t = "    Name               Type         Status\n    ---------------------------------------------\n    ALICEMOVIES    <00>  UNIQUE      Registered\n    WORKGROUP      <00>  GROUP       Registered";
-  assert.equal(parseNbtstat(t), "ALICEMOVIES");
+  const t = "    Name               Type         Status\n    ---------------------------------------------\n    MEDIA-PC    <00>  UNIQUE      Registered\n    WORKGROUP      <00>  GROUP       Registered";
+  assert.equal(parseNbtstat(t), "MEDIA-PC");
 });
 
 test("the first look learns the house; after that, a new device is an event", async () => {

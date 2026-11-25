@@ -2,13 +2,14 @@
 // A click goes there; + makes a room for this device or joins another; a tab's menu renames it, brings someone over
 // from it, closes the tab, or deletes the room (lib/rooms.ts).
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { DoorOpen, Home, MonitorSmartphone, Pencil, Plus, Trash2, UserPlus, X } from "lucide-react";
 import { desk, useDesk } from "../lib/store.ts";
 import { closeTab, deleteRoom, HOME, membersOf, newRoom, renameRoom, roomName, roomsOn, switchRoom } from "../lib/rooms.ts";
 import { deviceName } from "../lib/devshare.ts";
 import { openMenu, type MenuItem } from "./ContextMenu.tsx";
 import { askText, askUser } from "./Ask.tsx";
+import { roomPulses, wanderers, type RoomPulse } from "../lib/roomTemps.ts";
 
 const tell = (why: string) => why && desk().notice(why);
 
@@ -104,6 +105,71 @@ export function RoomTabs() {
       <button className="room-tab add" onClick={plusMenu} aria-label="A new room, or join one" data-tip="A room for this device, or join another device's">
         <Plus size={13} />
       </button>
+      <RoomTemperature />
     </div>
+  );
+}
+
+const agoShort = (ms: number) => (ms < 60_000 ? "just now" : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min ago` : ms < 86_400_000 ? `${Math.round(ms / 3_600_000)} h ago` : `${Math.round(ms / 86_400_000)} d ago`);
+const HEAT = { quiet: "🌙 quiet", warm: "☕ warm", lively: "🔥 lively" } as const;
+
+/** Dee's room-temperature panel: every room at a glance (how lively, who's there, the last thing said), and who is in
+ *  more than one room, so conversations don't wander through each other. */
+function RoomTemperature() {
+  const rooms = useDesk((s) => s.rooms);
+  const roomId = useDesk((s) => s.roomId);
+  const character = useDesk((s) => s.character);
+  const [open, setOpen] = useState(false);
+  const [pulses, setPulses] = useState<RoomPulse[] | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    const load = () => void roomPulses(rooms).then((p) => live && setPulses(p)).catch(() => live && setPulses([]));
+    load();
+    const t = window.setInterval(load, 10_000);
+    return () => {
+      live = false;
+      window.clearInterval(t);
+    };
+  }, [open, rooms]);
+  const nameOf = (id: string) => character(id)?.short ?? id;
+  const wander = pulses ? wanderers(pulses) : new Map<string, string[]>();
+  const now = Date.now();
+  return (
+    <span className="room-temp">
+      <button className="room-tab add" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-label="Room temperature: every room at a glance" data-tip="Every room at a glance: how lively, who's there">
+        🌡
+      </button>
+      {open ? (
+        <div className="room-temp-card small" role="dialog" aria-label="Room temperature">
+          {!pulses ? (
+            <div className="muted">Taking the rooms' temperature…</div>
+          ) : (
+            <>
+              {pulses.map((r) => (
+                <div key={r.id || "home"} className={`room-temp-row ${r.heat}`}>
+                  <div>
+                    <b>{r.name}</b>
+                    {r.id === roomId ? <span className="muted"> (you're here)</span> : null} · {HEAT[r.heat]}
+                    {r.recent ? <span className="muted"> ({r.recent} said in 10 min)</span> : null}
+                  </div>
+                  <div className="muted">{r.members.length ? r.members.map(nameOf).join(", ") : "no characters"}</div>
+                  {r.last ? (
+                    <div className="room-temp-last">
+                      {r.last.name}, {agoShort(now - r.last.at)}: “{r.last.text}”
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+              {wander.size ? (
+                <div className="room-temp-wander">
+                  In more than one room: {[...wander].map(([id, names]) => `${nameOf(id)} (${names.join(" and ")})`).join("; ")}. What's said in one may come up in the other.
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
+      ) : null}
+    </span>
   );
 }

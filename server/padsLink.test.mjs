@@ -39,17 +39,17 @@ function server(name) {
 const me = "Mrrowr-murrr";
 
 test("two servers link with a one-time code, share one roster, and send to each other's devices and vaults", async () => {
-  const A = await server("Titan");
+  const A = await server("Studio");
   const B = await server("iMac");
   try {
-    A.pads.hello({ id: "titan-pc-0001", account: me, name: "Titan PC", kind: "desktop" });
+    A.pads.hello({ id: "studio-pc-0001", account: me, name: "Studio PC", kind: "desktop" });
     B.pads.hello({ id: "imac-00000001", account: me, name: "iMac", kind: "mac" });
 
     // A wrong code is refused; the right one works once
     await assert.rejects(B.link.link(A.url, "pdl_wrong", { port: B.port }), /isn't valid/);
     const { code } = A.peers.invite();
     const got = await B.link.link(A.url, code, { port: B.port });
-    assert.equal(got.name, "Titan");
+    assert.equal(got.name, "Studio");
     await assert.rejects(B.link.link(A.url, code, { port: B.port }), /isn't valid/);
     // A reaches B where the request came from, on the port B gave
     assert.equal(A.peers.list()[0].url, B.url);
@@ -58,27 +58,27 @@ test("two servers link with a one-time code, share one roster, and send to each 
 
     // each sees both devices, and which server each is on
     const ra = await A.link.roster(me);
-    assert.deepEqual(ra.devices.map((d) => `${d.name}@${d.server}`).sort(), ["Titan PC@Titan", "iMac@iMac"]);
+    assert.deepEqual(ra.devices.map((d) => `${d.name}@${d.server}`).sort(), ["Studio PC@Studio", "iMac@iMac"]);
     assert.equal(ra.servers.find((s) => s.name === "iMac").here, true);
     const rb = await B.link.roster(me);
     assert.equal(rb.devices.length, 2);
 
-    // a link from Titan PC to the iMac
-    await A.link.send(me, { from: "titan-pc-0001", to: "imac-00000001", item: { kind: "link", url: "https://example.org/", title: "Ex" } });
+    // a link from Studio PC to the iMac
+    await A.link.send(me, { from: "studio-pc-0001", to: "imac-00000001", item: { kind: "link", url: "https://example.org/", title: "Ex" } });
     // a picture: it travels and lands in B's vault
     fs.mkdirSync(path.join(A.vault, "Pictures/Poses"), { recursive: true });
     fs.writeFileSync(path.join(A.vault, "Pictures/Poses/Cat.png"), Buffer.from([137, 80, 78, 71, 1, 2, 3]));
-    await A.link.send(me, { from: "titan-pc-0001", to: "imac-00000001", item: { kind: "image", path: "Pictures/Poses/Cat.png", title: "Cat" } });
+    await A.link.send(me, { from: "studio-pc-0001", to: "imac-00000001", item: { kind: "image", path: "Pictures/Poses/Cat.png", title: "Cat" } });
     const mail = B.pads.hello({ id: "imac-00000001", account: me, name: "iMac", kind: "mac" }).mail;
     assert.equal(mail.length, 2);
-    assert.equal(mail[0].from, "Titan PC (Titan)");
-    assert.equal(mail[1].item.path, "Pictures/From Titan/Cat.png");
-    assert.ok(fs.existsSync(path.join(B.vault, "Pictures/From Titan/Cat.png")));
+    assert.equal(mail[0].from, "Studio PC (Studio)");
+    assert.equal(mail[1].item.path, "Pictures/From Studio/Cat.png");
+    assert.ok(fs.existsSync(path.join(B.vault, "Pictures/From Studio/Cat.png")));
 
     // to the iMac's server itself: a note in its vault
-    const kept = await A.link.send(me, { from: "titan-pc-0001", to: `server:${B.peers.me().id}`, item: { kind: "text", text: "Hello iMac\nmore" } });
+    const kept = await A.link.send(me, { from: "studio-pc-0001", to: `server:${B.peers.me().id}`, item: { kind: "text", text: "Hello iMac\nmore" } });
     assert.match(kept.path, /^Sent here\/Hello iMac /);
-    assert.match(fs.readFileSync(path.join(B.vault, kept.path), "utf8"), /Sent from Titan PC \(Titan\)/);
+    assert.match(fs.readFileSync(path.join(B.vault, kept.path), "utf8"), /Sent from Studio PC \(Studio\)/);
 
     // a server that isn't linked (or was unlinked) is turned away
     B.peers.remove(A.peers.me().id);

@@ -6,8 +6,8 @@ import path from "node:path";
 import { listFolders, netShare, parseNetView } from "./music.mjs";
 
 test("network addresses: a computer, a share, a folder in it", () => {
-  assert.deepEqual(netShare(String.raw`\\ALICEMOVIES`), { host: "ALICEMOVIES", share: "" });
-  assert.deepEqual(netShare(String.raw`\\ALICEMOVIES\1 Alice\Films`), { host: "ALICEMOVIES", share: "1 Alice" });
+  assert.deepEqual(netShare(String.raw`\\MEDIA-PC`), { host: "MEDIA-PC", share: "" });
+  assert.deepEqual(netShare(String.raw`\\MEDIA-PC\Films\Films`), { host: "MEDIA-PC", share: "Films" });
   assert.deepEqual(netShare("//nas/media"), { host: "nas", share: "media" });
   assert.equal(netShare(String.raw`C:\Music`), null);
 });
@@ -54,7 +54,7 @@ test("a zip unpacks beside itself, and its names can't climb out", async () => {
 test("a phone reaches the network places this computer opened, and that computer's other shares, never C$", async () => {
   const { createFiles } = await import("./files.mjs");
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "pdd-netp-"));
-  fs.writeFileSync(path.join(d, "network-places.json"), JSON.stringify([String.raw`\\ALICEMOVIES\music`]));
+  fs.writeFileSync(path.join(d, "network-places.json"), JSON.stringify([String.raw`\\MEDIA-PC\music`]));
   const F = createFiles({ dataDir: () => d, musicFolders: () => [], getWholePc: () => false, setWholePc: () => {} });
   const ok = (p) => {
     try {
@@ -64,8 +64,8 @@ test("a phone reaches the network places this computer opened, and that computer
       return false;
     }
   };
-  assert.equal(ok(String.raw`\\ALICEMOVIES\music\Album`), true);
-  assert.equal(ok(String.raw`\\ALICEMOVIES\movies`), true, "another share on a computer it already goes to");
-  assert.equal(ok(String.raw`\\ALICEMOVIES\C$`), false, "never a hidden admin share");
+  assert.equal(ok(String.raw`\\MEDIA-PC\music\Album`), true);
+  assert.equal(ok(String.raw`\\MEDIA-PC\movies`), true, "another share on a computer it already goes to");
+  assert.equal(ok(String.raw`\\MEDIA-PC\C$`), false, "never a hidden admin share");
   assert.equal(ok(String.raw`\\ELSEWHERE\music`), false, "a computer it hasn't opened");
 });

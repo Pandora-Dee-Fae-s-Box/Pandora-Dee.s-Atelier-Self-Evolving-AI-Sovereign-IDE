@@ -31,6 +31,15 @@ export function checkManifest(m) {
     if (!/^[0-9a-f]{64}$/i.test(m.release?.sha256 || "")) throw new Error("This kind needs the release file's sha256.");
   }
   if (m.kind === "mcp" && typeof m.mcp?.command !== "string") throw new Error("A tool server gives its command.");
+  // the keys a tool server needs, by name only (${NAME}): filled from its owner's own vault, then the household's Keys.
+  // A manifest never carries a value, and never sets anything else (PATH and the like stay the computer's own).
+  if (m.kind === "mcp" && m.mcp.env !== undefined) {
+    if (!m.mcp.env || typeof m.mcp.env !== "object" || Array.isArray(m.mcp.env)) throw new Error("A tool server's env is names and their keys.");
+    for (const [k, v] of Object.entries(m.mcp.env)) {
+      if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(k) || /^(PATH|PATHEXT|NODE_OPTIONS|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|COMSPEC|SYSTEMROOT|TEMP|TMP)$/.test(k)) throw new Error(`${k} can't be set by a module.`);
+      if (typeof v !== "string" || !/^\$\{[A-Z][A-Z0-9_]{0,63}\}$/.test(v)) throw new Error(`${k} must name a key ($` + `{NAME}), never hold a value.`);
+    }
+  }
   return {
     name: m.name,
     kind: m.kind,
@@ -99,7 +108,7 @@ export function createModules({ dataDir, fetchFn = fetch, importXdc }) {
         if (sum !== m.release.sha256.toLowerCase()) throw Object.assign(new Error(`The release file's checksum doesn't match (${sum.slice(0, 12)}…): not installed.`), { status: 409 });
         if (m.kind === "xdc") out.app = importXdc(bytes, path.basename(new URL(m.release.url).pathname) || `${m.name}.xdc`);
         else out.backup = JSON.parse(bytes.toString("utf8"));
-      } else out.mcp = { name: m.name, command: m.mcp.command, args: Array.isArray(m.mcp.args) ? m.mcp.args.map(String) : [], source: `https://github.com/${org}/${repo}/tree/${commit}` };
+      } else out.mcp = { name: m.name, command: m.mcp.command, args: Array.isArray(m.mcp.args) ? m.mcp.args.map(String) : [], env: m.mcp.env ?? {}, source: `https://github.com/${org}/${repo}/tree/${commit}` };
       const all = installed();
       all[`${org}/${repo}`] = { commit, version: m.version, kind: m.kind, name: m.name, at: Date.now() };
       fs.mkdirSync(path.dirname(installedFile()), { recursive: true });

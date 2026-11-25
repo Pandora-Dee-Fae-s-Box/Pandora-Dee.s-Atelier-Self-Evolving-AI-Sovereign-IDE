@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, ChevronDown, ChevronLeft, ChevronRight, Clapperboard, FileDown, FileUp, HardDrive, MonitorPlay, MonitorSmartphone, Library, Network, PanelLeft, Smartphone, Tv, Download, Film, Folder, FolderInput, FolderOpen, FolderPlus, ListMusic, ListPlus, MoreHorizontal, Pencil, Play, Plus, RefreshCw, Repeat, Search, Shuffle, Star, Trash2, Upload, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, ChevronLeft, ChevronRight, Clapperboard, FileDown, FileUp, HardDrive, MonitorPlay, MonitorSmartphone, Library, Network, PanelLeft, Smartphone, Tv, Download, Film, Copy, ExternalLink, Link2, Folder, FolderInput, FolderOpen, FolderPlus, ListMusic, ListPlus, MoreHorizontal, Pencil, Play, Plus, RefreshCw, Repeat, Search, Shuffle, Star, Trash2, Upload, X } from "lucide-react";
 import { desk, useDesk } from "../lib/store.ts";
 import { baseName, downloadToDevice, fileApi, pickInExplorer, rawUrl } from "../lib/explorer.ts";
 import { KINDS, kindOf, placeIn, type Kind } from "../lib/videoKinds.ts";
@@ -21,6 +21,8 @@ import {
   sizeText,
   theaterApi,
   thumbUrl,
+  takeTheaterAsk,
+  takeTheatreQueue,
   useJobs,
   useLibrary,
   videoUrl,
@@ -31,7 +33,10 @@ import {
 import { openMenu, openMenuAt, type MenuItem } from "../ui/ContextMenu.tsx";
 import { askText, askUser } from "../ui/Ask.tsx";
 import { inFolder, underFolder } from "../lib/episodes.ts";
+import { QUEUE_WHERE, WHERE_LABEL, placeInQueue, type QueueWhere } from "../lib/queueOps.ts";
 import { useWidth } from "../ui/hooks.ts";
+import { allowed, blockedBecause } from "../lib/privacy.ts";
+import { copyText } from "../lib/clipboard.ts";
 
 const ALL = "\u0000all", FAVS = "\u0000favs", LIST = "\u0000list:", DEV = "\u0000device:", COL = "\u0000col:", KIND = "\u0000kind:", SHARED = "\u0000shared";
 const KIND_ICON: Record<Kind, React.ReactNode> = { movie: <Clapperboard size={14} />, series: <Tv size={14} />, recording: <MonitorPlay size={14} />, unknown: <Film size={14} /> };
@@ -101,18 +106,59 @@ const savedShelf = () => {
     return "";
   }
 };
+// what was open, so a reload carries on: the shelf, the video and the order it was playing in (each video's own
+// position is remembered already). Only for a while: opening the Theatre tomorrow starts at the shelves.
+const PLACE_KEY = "pdd-theater-place";
+type Place = { shelf: string; playing: string | null; order: string[] | null; repeat: boolean; t: number };
+const savedPlace = (): Partial<Place> => {
+  try {
+    const p = JSON.parse(localStorage.getItem(PLACE_KEY) ?? "null") as Place | null;
+    return p && Date.now() - p.t < 12 * 3600_000 ? p : {};
+  } catch {
+    return {};
+  }
+};
 const month = (t: number) => new Date(t).toLocaleDateString(undefined, { month: "long", year: "numeric" });
 
 export function TheaterApp() {
   const { lib, error } = useLibrary();
   const toddler = useDesk((s) => s.toddler);
   const jobs = useJobs();
-  const [shelf, setShelf] = useState(ALL);
+  const [place] = useState(savedPlace);
+  const [shelf, setShelf] = useState(place.shelf ?? ALL);
   const [q, setQ] = useState("");
-  const [playing, setPlaying] = useState<string | null>(null);
+  const [playing, setPlaying] = useState<string | null>(place.playing ?? null);
   // a playlist played shuffled keeps its shuffled order until it's played again; repeat starts it over at the end
-  const [order, setOrder] = useState<string[] | null>(null);
-  const [repeat, setRepeat] = useState(false);
+  const [order, setOrder] = useState<string[] | null>(place.order ?? null);
+  const [repeat, setRepeat] = useState(place.repeat ?? false);
+  useEffect(() => {
+    try {
+      localStorage.setItem(PLACE_KEY, JSON.stringify({ shelf, playing, order, repeat, t: Date.now() } satisfies Place));
+    } catch {
+      /* it just won't carry on */
+    }
+  }, [shelf, playing, order, repeat]);
+  // a file handed over from Explorer: its shelf copy when it has one, or played as it is
+  const [asked, setAsked] = useState<string | null>(takeTheaterAsk);
+  const [loose, setLoose] = useState<Video | null>(null);
+  useEffect(() => {
+    const take = () => setAsked(takeTheaterAsk());
+    window.addEventListener("pdd-theater-ask", take);
+    return () => window.removeEventListener("pdd-theater-ask", take);
+  }, []);
+  useEffect(() => {
+    if (!asked || (!lib && !error)) return;
+    const want = asked.replace(/\\/g, "/").toLowerCase();
+    const have = lib?.videos.find((v) => v.path.replace(/\\/g, "/").toLowerCase() === want);
+    if (have) setLoose(null);
+    else {
+      const name = asked.split(/[\\/]/).pop() ?? asked;
+      setLoose({ id: `file:${asked}`, path: asked, name: name.replace(/\.[^.]+$/, ""), ext: (/\.([^.]+)$/.exec(name)?.[1] ?? "").toLowerCase(), shelf: "", size: 0, mtime: 0, seconds: 0, thumb: -1, fav: false, device: true });
+    }
+    setOrder(null);
+    setPlaying(have?.id ?? `file:${asked}`);
+    setAsked(null);
+  }, [asked, lib, error]);
   const playlists = lib?.playlists ?? [];
   const playlist = shelf.startsWith(LIST) ? (playlists.find((p) => p.id === shelf.slice(LIST.length)) ?? null) : null;
   const [target, setTarget] = useState(savedShelf);
@@ -252,8 +298,7 @@ export function TheaterApp() {
     toddler || v.watched || v.device
       ? []
       : [
-          { sep: true },
-          { label: "Rename…", icon: <Pencil size={14} />, run: () => void renameVideo(v.path, v.name) },
+          ...(v.link ? linkItems(v) : [{ sep: true } as MenuItem, { label: "Rename…", icon: <Pencil size={14} />, run: () => void renameVideo(v.path, v.name) } as MenuItem]),
           { sep: true },
           { heading: "Add to shelf" },
           ...["", ...shelves]
@@ -266,6 +311,29 @@ export function TheaterApp() {
               }),
             ),
         ];
+
+  // ---- YouTube links ----
+  const addYouTube = async () => {
+    if (!allowed(desk().privacy, "web")) return desk().say(blockedBecause(desk().privacy, "web"));
+    const url = (await askText("A YouTube link", "", { placeholder: "https://youtu.be/…", yes: "Add it" }))?.trim();
+    if (!url) return;
+    // onto the shelf being looked at when it's one of the desktop's own, or a YouTube shelf
+    const own = shelves.includes(shelf) && !(lib?.folders ?? []).some((f) => f.name === shelf) && shelf !== "From devices" ? shelf : "";
+    try {
+      const r = await theaterApi.addLink(url, own);
+      await refreshLibrary();
+      desk().say(`${r.title || "That video"} is on ${r.shelf}${r.again ? " now (it was here already)" : ""}.`);
+    } catch (e) {
+      fail(e);
+    }
+  };
+  /** A link's own menu items: open it on YouTube, copy it, or take it out. */
+  const linkItems = (v: Video): MenuItem[] => [
+    { sep: true },
+    { label: "Open on YouTube", icon: <ExternalLink size={14} />, run: () => void window.open(v.path, "_blank", "noopener") },
+    { label: "Copy the link", icon: <Copy size={14} />, run: () => void copyText(v.path) },
+    { label: "Take it out of the Theatre", icon: <Trash2 size={14} />, danger: true, run: () => void theaterApi.dropLink(v.id).then(() => (desk().say(`${v.name} is out of the Theatre.`), refreshLibrary()), fail) },
+  ];
 
   // ---- playlist files (M3U / M3U8 / PLS) ----
   const openPlaylistFile = async (src: "device" | "desk") => {
@@ -280,7 +348,7 @@ export function TheaterApp() {
     if (!got) return;
     const entries = parsePlaylist(got.text);
     const { found, missing } = matchEntries(entries, lib?.videos ?? [], (v) => v.path);
-    if (!found.length) return desk().say(`None of the ${entries.length} in ${got.name} are in the Theater.`);
+    if (!found.length) return desk().say(`None of the ${entries.length} in ${got.name} are in the Theatre.`);
     try {
       const p = await changePlaylist({ name: nameFromFile(got.name), items: found.map((v) => v.id) });
       go(LIST + p.id);
@@ -307,6 +375,7 @@ export function TheaterApp() {
     const fail = (e: unknown) => desk().say(e instanceof Error ? e.message : String(e));
     const items: MenuItem[] = [{ label: "Play from the start", icon: <Play size={14} />, run: () => playOn(underFolder(videosOf(s), rel)) }];
     if (toddler) return items;
+    items.push(...queueItems(underFolder(videosOf(s), rel)), { sep: true });
     if (inCollection) {
       const { c, i } = inCollection;
       const move = (to: number) => {
@@ -414,16 +483,17 @@ export function TheaterApp() {
   }, [lib, shelf, q, playlist, onDevice, devVideos, collection, kindShown, sorted]);
   const here = useMemo(() => (browsing ? inFolder(shown, where) : null), [browsing, shown, where]);
   // what the player steps through: the shuffled order while one is playing shuffled, otherwise what's shown
+  // (an order holds any video it was given, from whichever shelf: queued ones stay while you browse elsewhere)
   const queue = useMemo(() => {
     if (!order) return shown;
-    const byId = new Map(shown.map((v) => [v.id, v]));
+    const byId = new Map([...(lib?.videos ?? []), ...(devVideos?.videos ?? []), ...shown].map((v) => [v.id, v]));
     return order.map((id) => byId.get(id)).filter((v): v is Video => Boolean(v));
-  }, [order, shown]);
+  }, [order, shown, lib, devVideos]);
 
   // thumbnails for the ones still without, a few at a time as the list changes
   useEffect(() => {
     // (not a device's: those come over that device's connection, and are watched there)
-    if (shown.some((v) => v.thumb === 0 && !v.device)) void makeThumbs(shown.filter((v) => !v.device).slice(0, 200));
+    if (shown.some((v) => v.thumb === 0 && !v.device && !v.link)) void makeThumbs(shown.filter((v) => !v.device && !v.link).slice(0, 200));
   }, [shown]);
 
   const groups = useMemo(() => {
@@ -459,10 +529,46 @@ export function TheaterApp() {
 
   const take = async (files: File[]) => {
     const n = await backUp(files, target);
-    if (!n) desk().say("Those aren't videos the Theater keeps (mp4, mov, webm, mkv…).");
+    if (!n) desk().say("Those aren't videos the Theatre keeps (mp4, mov, webm, mkv…).");
   };
 
-  const current = playing ? (lib?.videos.find((v) => v.id === playing) ?? devVideos?.videos.find((v) => v.id === playing) ?? null) : null;
+  const current = playing ? (lib?.videos.find((v) => v.id === playing) ?? devVideos?.videos.find((v) => v.id === playing) ?? (loose?.id === playing ? loose : null)) : null;
+
+  /** Put videos in what plays: next, last, or after the rest of this season (its folder) (lib/queueOps.ts). A video
+   *  already further on moves rather than playing twice. With nothing playing, they play. */
+  const queueVideos = (vs: Video[], where: QueueWhere) => {
+    const ids = [...new Set(vs.map((v) => v.id))].filter((id) => id !== current?.id);
+    if (!ids.length) return;
+    if (!current) {
+      setOrder(ids);
+      setPlaying(ids[0]);
+      return;
+    }
+    const known = new Map([...queue, ...vs, current].map((v) => [v.id, v]));
+    let base = queue.map((v) => v.id).filter((id) => !ids.includes(id));
+    if (!base.includes(current.id)) base = [current.id];
+    const season = (id: string) => {
+      const v = known.get(id);
+      return v?.folder ? `${v.shelf}/${v.folder}` : id;
+    };
+    setOrder(placeInQueue(base, base.indexOf(current.id), ids, where, season).queue);
+    const first = known.get(ids[0]);
+    desk().say(`${ids.length === 1 ? (first?.name ?? "It") : `${ids.length} videos`} ${where === "next" ? "up next" : where === "last" ? "at the end of what plays" : "after this season"}.`);
+  };
+  const queueItems = (vs: Video[]): MenuItem[] => QUEUE_WHERE.map((w) => ({ label: WHERE_LABEL[w].replace("album", "season"), disabled: !vs.length, run: () => queueVideos(vs, w) }));
+  // queued from outside (a tool, a ferry window, a jetty), by id
+  const queueRef = useRef(queueVideos);
+  queueRef.current = queueVideos;
+  useEffect(() => {
+    if (!lib) return;
+    const take = () => {
+      const byId = new Map([...(lib?.videos ?? []), ...(devVideos?.videos ?? [])].map((v) => [v.id, v]));
+      for (const q of takeTheatreQueue()) queueRef.current(q.ids.flatMap((id) => (byId.has(id) ? [byId.get(id)!] : [])), q.where);
+    };
+    take();
+    window.addEventListener("pdd-theater-queue", take);
+    return () => window.removeEventListener("pdd-theater-queue", take);
+  }, [lib, devVideos]);
 
   // ---- the sidebar: kinds, collections, playlists, shelves (by the device they came from), folders, devices ----
   const counts = new Map<string, number>();
@@ -564,7 +670,7 @@ export function TheaterApp() {
           {netFolders.map((f) => (
             <Item key={f.path} id={f.name} label={f.name} icon={<Folder size={14} />} n={counts.get(f.name)} depth={1} menu={() => shelfMenu(f.name)} title={f.path} />
           ))}
-          {netFolders.length ? null : <p className="faint small theater-side-note">A share like \\ALICEMOVIES\movies, played from where it is.</p>}
+          {netFolders.length ? null : <p className="faint small theater-side-note">A share like \\MEDIA-PC\movies, played from where it is.</p>}
         </Sec>
       ) : null}
       {devices.length ? (
@@ -602,6 +708,9 @@ export function TheaterApp() {
         </div>
         <button className="btn primary" onClick={() => pick.current?.click()} title="Copies videos from this device onto the desktop, checked piece by piece">
           <Upload size={15} /> {narrow ? "Back up" : "Back up videos"}
+        </button>
+        <button className="btn" onClick={() => void addYouTube()} title="A YouTube video on a shelf here: its title and picture kept, played from YouTube">
+          <Link2 size={15} /> {narrow ? "YouTube" : "Add a YouTube link"}
         </button>
         <label className="theater-to small">
           <span className="faint">to</span>
@@ -712,8 +821,8 @@ export function TheaterApp() {
           <button
             className={`btn small${collection.kids ? " on" : " ghost"}`}
             aria-pressed={Boolean(collection.kids)}
-            onClick={() => void changeCollection({ id: collection.id, kids: !collection.kids }).then((c) => desk().say(c.kids ? `Toddler mode's Theater shows ${c.name}.` : `${c.name} isn't in toddler mode's Theater any more.`))}
-            title="In toddler mode, the Theater shows only the collections marked for it"
+            onClick={() => void changeCollection({ id: collection.id, kids: !collection.kids }).then((c) => desk().say(c.kids ? `Toddler mode's Theatre shows ${c.name}.` : `${c.name} isn't in toddler mode's Theatre any more.`))}
+            title="In toddler mode, the Theatre shows only the collections marked for it"
           >
             🧸 {collection.kids ? "In toddler mode" : "Show in toddler mode"}
           </button>
@@ -808,7 +917,7 @@ export function TheaterApp() {
         {toddler && !kidsCols.length ? (
           <div className="theater-empty">
             <Film size={42} />
-            <p className="small muted">Nothing is chosen for toddler mode yet. A grown-up can choose a collection in the Theater: open it, then press 🧸 Show in toddler mode.</p>
+            <p className="small muted">Nothing is chosen for toddler mode yet. A grown-up can choose a collection in the Theatre: open it, then press 🧸 Show in toddler mode.</p>
           </div>
         ) : null}
         {error ? <p className="small bad-text">{error}</p> : null}
@@ -857,7 +966,7 @@ export function TheaterApp() {
             {here.folders.length ? (
               <div className="theater-grid">
                 {here.folders.map((f) => (
-                  <FolderTile key={f.rel} name={f.name} videos={f.videos} onOpen={() => open(shelf, f.rel)} menu={() => (virtual ? [{ label: "Play from the start", icon: <Play size={14} />, run: () => playOn(underFolder(shown, f.rel)) }] : showMenu(shelf, f.rel))} />
+                  <FolderTile key={f.rel} name={f.name} videos={f.videos} onOpen={() => open(shelf, f.rel)} menu={() => (virtual ? [{ label: "Play from the start", icon: <Play size={14} />, run: () => playOn(underFolder(shown, f.rel)) }, ...(toddler ? [] : queueItems(underFolder(shown, f.rel)))] : showMenu(shelf, f.rel))} />
                 ))}
               </div>
             ) : null}
@@ -865,11 +974,11 @@ export function TheaterApp() {
               <div className="theater-grid" style={{ marginTop: 10 }}>
                 {here.here.map((v) => (
                   <Card
-                    key={v.id}
+                    key={v.path}
                     v={v}
                     // on from this one: through the rest of the show (its seasons in order), or what's loose here
                     onPlay={() => playOn(where ? underFolder(shown, where.split("/")[0]) : here.here, v)}
-                    menu={() => (toddler ? [] : [...addToPlaylistItems(v, playlists), ...videoShelfItems(v)])}
+                    menu={() => (toddler ? [] : [...queueItems([v]), { sep: true }, ...addToPlaylistItems(v, playlists), ...videoShelfItems(v)])}
                   />
                 ))}
               </div>
@@ -882,12 +991,12 @@ export function TheaterApp() {
             <div className="theater-grid">
               {g.videos.map((v, i) => (
                 <Card
-                  key={v.id}
+                  key={v.path}
                   v={v}
                   onPlay={() => (setOrder(null), setPlaying(v.id))}
                   menu={() => {
                     if (toddler) return [];
-                    const items = [...addToPlaylistItems(v, playlists), ...videoShelfItems(v)];
+                    const items = [...queueItems([v]), { sep: true } as MenuItem, ...addToPlaylistItems(v, playlists), ...videoShelfItems(v)];
                     if (!playlist || q) return items;
                     // inside a playlist: its order, and leaving it
                     const move = (to: number) => {
@@ -1003,7 +1112,7 @@ function Card({ v, onPlay, menu }: { v: Video; onPlay: () => void; menu: () => M
         const items = menu();
         if (items.length) openMenu(e, items);
       }}
-      title={`${v.name} · ${sizeText(v.size)}${v.shelf ? ` · ${v.shelf}` : ""}`}>
+      title={`${v.name} · ${v.link ? `YouTube${v.author ? `, ${v.author}` : ""}` : sizeText(v.size)}${v.shelf ? ` · ${v.shelf}` : ""}`}>
       <span className="theater-thumb">
         {v.thumb === 1 ? <img src={thumbUrl(v.id)} alt="" loading="lazy" /> : <Film size={30} />}
         {v.seconds ? <span className="theater-len">{lengthText(v.seconds)}</span> : null}
@@ -1077,6 +1186,21 @@ function Player({
   };
 
   const menu = (): MenuItem[] => {
+    const said = (e: unknown) => desk().say(e instanceof Error ? e.message : String(e));
+    if (v.link)
+      return [
+        { label: "Open on YouTube", icon: <ExternalLink size={14} />, run: () => void window.open(v.path, "_blank", "noopener") },
+        { label: "Copy the link", icon: <Copy size={14} />, run: () => void copyText(v.path) },
+        ...(toddler
+          ? []
+          : [
+              ...addToPlaylistItems(v, playlists),
+              { heading: "Move to shelf" } as MenuItem,
+              ...["", ...shelves].filter((s) => s !== v.shelf).map((s): MenuItem => ({ label: s || "Videos (no shelf)", icon: <FolderInput size={14} />, run: () => void theaterApi.move(v.path, s).then(() => (desk().say(`Moved to ${s || "Videos"}.`), refreshLibrary()), said) })),
+              { sep: true } as MenuItem,
+              { label: "Take it out of the Theatre", icon: <Trash2 size={14} />, danger: true, run: () => (onClose(), void theaterApi.dropLink(v.id).then(() => refreshLibrary(), said)) } as MenuItem,
+            ]),
+      ];
     const items: MenuItem[] = [{ label: "Save a copy to this device", icon: <Download size={14} />, run: () => downloadToDevice(v.path) }];
     if (toddler || v.device) return items;
     // a watched folder's video stays as it is there: no renaming, moving or deleting from here
@@ -1136,13 +1260,17 @@ function Player({
           <MoreHorizontal size={18} />
         </button>
       </div>
-      <video key={v.id} ref={vid} className="theater-video" src={videoUrl(v)} controls playsInline onEnded={() => next && onPick(next.id)} />
+      {v.link ? (
+        <YouTubePlayer v={v} onEnded={() => next && onPick(next.id)} />
+      ) : (
+        <video key={v.id} ref={vid} className="theater-video" src={videoUrl(v)} controls playsInline onEnded={() => next && onPick(next.id)} />
+      )}
       <div className="theater-nav">
         <button className="btn ghost" disabled={!prev} onClick={() => prev && onPick(prev.id)} aria-label="Previous video">
           <ChevronLeft size={18} /> {prev ? <span className="theater-nav-name">{prev.name}</span> : null}
         </button>
         <span className="small faint">
-          {i + 1} of {list.length} · {sizeText(v.size)}
+          {i + 1} of {list.length} · {v.link ? v.author || "YouTube" : sizeText(v.size)}
         </span>
         <button className="btn ghost" disabled={!next} onClick={() => next && onPick(next.id)} aria-label="Next video">
           {next ? <span className="theater-nav-name">{next.name}</span> : null} <ChevronRight size={18} />
@@ -1150,6 +1278,59 @@ function Player({
       </div>
     </div>
   );
+}
+
+/** A YouTube link playing: YouTube's no-cookie player, starting where it was left on this device (or where the link
+ *  said), remembering as it plays, and on to the next video when it ends. Its messages are only taken from its own
+ *  frame. With the web switched off in Privacy it says so instead. */
+function YouTubePlayer({ v, onEnded }: { v: Video; onEnded: () => void }) {
+  const frame = useRef<HTMLIFrameElement>(null);
+  const ended = useRef(onEnded);
+  ended.current = onEnded;
+  const privacy = useDesk((s) => s.privacy);
+  const web = allowed(privacy, "web");
+  const [from] = useState(() => Math.floor(leftOff(v.id) || v.start || 0));
+  useEffect(() => {
+    if (!web) return;
+    let at = 0;
+    let length = v.seconds;
+    const msg = (e: MessageEvent) => {
+      if (!frame.current || e.source !== frame.current.contentWindow) return;
+      let d: { info?: { currentTime?: number; duration?: number; playerState?: number } } | null = null;
+      try {
+        d = typeof e.data === "string" ? JSON.parse(e.data) : e.data;
+      } catch {
+        return;
+      }
+      const info = d?.info;
+      if (!info) return;
+      if (typeof info.currentTime === "number") at = info.currentTime;
+      if (typeof info.duration === "number" && info.duration > 0) length = info.duration;
+      if (info.playerState === 0) ended.current();
+    };
+    window.addEventListener("message", msg);
+    // the player only reports its time once it's asked to (YouTube's own iframe API does the same)
+    const hello = () => frame.current?.contentWindow?.postMessage(JSON.stringify({ event: "listening", id: 1, channel: "widget" }), "*");
+    const f = frame.current;
+    const again = () => (hello(), window.setTimeout(hello, 1000));
+    f?.addEventListener("load", again);
+    const save = window.setInterval(() => at && rememberPosition(v.id, at, length), 4000);
+    return () => {
+      window.removeEventListener("message", msg);
+      f?.removeEventListener("load", again);
+      window.clearInterval(save);
+      if (at) rememberPosition(v.id, at, length);
+    };
+  }, [v.id, v.seconds, web]);
+  if (!web)
+    return (
+      <div className="theater-video theater-yt-off">
+        <p>{blockedBecause(privacy, "web")}</p>
+        <p className="faint small">YouTube links play from YouTube, so they need the web switched on in Privacy.</p>
+      </div>
+    );
+  const src = `https://www.youtube-nocookie.com/embed/${v.yt}?autoplay=1&enablejsapi=1&rel=0&playsinline=1&start=${from}&origin=${encodeURIComponent(location.origin)}`;
+  return <iframe key={v.id} ref={frame} className="theater-video" src={src} title={v.name} allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowFullScreen referrerPolicy="strict-origin-when-cross-origin" />;
 }
 
 /** What this device is backing up, and what's safe to let go of. */
@@ -1184,7 +1365,7 @@ function Uploads() {
       {busy.length ? <div className="theater-bar-total"><span style={{ width: `${total ? (sent / total) * 100 : 0}%` }} /></div> : null}
       {open ? (
         <>
-          {busy.length ? <p className="small faint" style={{ margin: "4px 0" }}>Keep this page open until it's done. If the Wi-Fi drops, it carries on from where it got to.</p> : null}
+          {busy.length ? <p className="small faint" style={{ margin: "4px 0" }}>Keep this page open until it's done. If the Wi-Fi drops, it carries on from where it got to. If it stops anyway, choose the same video again and it picks up from there.</p> : null}
           {safe.length && !busy.length ? (
             <p className="small muted" style={{ margin: "4px 0" }}>
               Each one arrived whole{crypto.subtle ? ", checked piece by piece" : ""}. To free the space, delete them in this phone's Gallery or Photos app (and
@@ -1210,7 +1391,21 @@ function Uploads() {
                             ? "✓ Already on the desktop"
                             : j.error}
                 </span>
-                {j.state === "failed" ? (
+                {j.state === "failed" && j.reread ? (
+                  <label className="btn small" title="Choose the same video again; it carries on from where it stopped">
+                    Choose it again
+                    <input
+                      type="file"
+                      accept="video/*"
+                      hidden
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        e.target.value = "";
+                        if (f) void backUp([f], j.shelf);
+                      }}
+                    />
+                  </label>
+                ) : j.state === "failed" ? (
                   <button className="btn small" onClick={() => retryJob(j)}>
                     Try again
                   </button>

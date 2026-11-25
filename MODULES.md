@@ -51,6 +51,22 @@ fetched from the listed commit and given to the character you choose.
 It's never run from GitHub. It's added to Connections → Tool servers switched off, with a link to the commit: get the
 code there, set where it lives, and switch it on once you've looked.
 
+A tool server that needs keys names them, never their values:
+
+```json
+"mcp": {
+  "command": "node",
+  "args": ["pandora-mcp-server.cjs"],
+  "env": { "GITHUB_APP_ID": "${GITHUB_APP_ID}", "GITHUB_PRIVATE_KEY": "${GITHUB_PRIVATE_KEY}" }
+}
+```
+
+Installed for a character, it's hers. When it starts, each `${NAME}` is filled from her own keys first (Cast →
+her keys, sealed on the desktop's computer; read there, they never pass through a page), then from the household's
+Keys. A key that's a file, like a GitHub App's `.pem`, goes in with **From a file…** so its line breaks stay. A
+manifest can't set the computer's own variables (`PATH`, `NODE_OPTIONS` and the like), and an `env` value that isn't a
+`${NAME}` is refused.
+
 ## Making a checksum
 
 ```bash

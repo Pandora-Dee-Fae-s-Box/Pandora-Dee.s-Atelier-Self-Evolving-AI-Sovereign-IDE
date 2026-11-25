@@ -4,6 +4,10 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import * as WG from "./webgame.mjs";
+import * as AN from "./appNet.mjs";
+import * as OV from "./omargVoices.mjs";
+import { zipSync } from "fflate";
 import { createLibrary } from "./xdc.mjs";
 import { classicRelayScript, helperScript, webxdcScript } from "./inject.mjs";
 import { sshOp } from "./ssh.mjs";
@@ -43,7 +47,10 @@ import { ensureKey, sshShell } from "./terminalSsh.mjs";
 import { createPadsWire } from "./padsWire.mjs";
 import { createRequire } from "node:module";
 import { createPeers } from "./peers.mjs";
+import { createGameLinks } from "./gameLinks.mjs";
 import { createPadsLink } from "./padsLink.mjs";
+import { createSongFetch } from "./songFetch.mjs";
+import { createEngineStream } from "./engineStream.mjs";
 import os from "node:os";
 import dns from "node:dns";
 import { createHash } from "node:crypto";
@@ -110,10 +117,16 @@ const XDC_CSP = [
 export function deskServer() {
   let root = process.cwd();
   let dataDir = "";
+  let voices = null; // SEASIDE's own voices (omargVoices.mjs), made when first asked for
   let publicDir = "";
   let lib;
   let mus;
   const music = () => (mus ??= createMusic(dataDir));
+  let sf;
+  // songs fetched by this server straight from a song engine into the library (songFetch.mjs)
+  const songFetch = () => (sf ??= createSongFetch({ dir: () => music().ownDir() }));
+  // songs played straight from a song engine, not copied (engineStream.mjs)
+  const engineStream = createEngineStream();
   let crt;
   const creative = () => (crt ??= createCreative(() => dataDir));
   const browser = createBrowser();
@@ -169,7 +182,7 @@ export function deskServer() {
   });
   const modules = createModules({ dataDir: () => dataDir, importXdc: (bytes, name) => library().importAny(bytes, name) });
   const stdio = createMcpStdio();
-  // Media Theater: videos kept in the vault (see theater.mjs)
+  // Media Theatre: videos kept in the vault (see theater.mjs)
   const theater = createTheater({ vaultDir: () => path.join(dataDir, "vault") });
   // Classic opened on its own (a plain browser tab), paired with this desktop to use its relay (see pairs.mjs)
   const pairs = createPairs({ file: () => path.join(dataDir, "classic-pairs.json") });
@@ -180,6 +193,7 @@ export function deskServer() {
   // linked servers (one per device): PADS and "Send to" across all of them (see peers.mjs, padsLink.mjs)
   const peers = createPeers({ file: () => path.join(dataDir, "pads-servers.json") });
   let padsLink = null; // made once vaultFile is defined, below
+  let gameLinks = null;
   /** A paired page may use the relay, but never to reach the desktop itself (its own server, by any name that
    *  leads to this computer, after any redirect): that would give it the desktop's controls. */
   const notTheDesktop = (req) => async (u) => {
@@ -288,6 +302,8 @@ export function deskServer() {
   };
 
   padsLink = createPadsLink({ pads, peers, vaultFile });
+  // games across linked SEASIDEs, and the realtime channel across devices (see gameLinks.mjs)
+  gameLinks = createGameLinks({ peers, library, file: () => path.join(dataDir, "game-links.json") });
   /** Where other devices can reach this server: this computer, and its home-network (and Tailscale) addresses. */
   const addressesOf = (port) => [
     `http://localhost:${port}`,
@@ -303,6 +319,21 @@ export function deskServer() {
   // made on this computer itself: from this machine, to the local address (not through Tailscale or the network)
   const onThisPc = (req) =>
     /^(127\.|::1$|::ffff:127\.)/.test(String(req.socket.remoteAddress || "")) && (isDeskHost(req) || hostOf(req) === "127.0.0.1" || hostOf(req) === "[::1]");
+
+  // Asked by one of SEASIDE's own pages. A browser says where each request comes from (Sec-Fetch-Site, or the page it was
+  // made on); a plain program on this computer doesn't, so a tool a character drives (her own http request, a script)
+  // can't be steered into reading the household's or the characters' keys. (The lasting answer is the server filling
+  // keys in itself, so they never leave it; until then, keys go only to pages.)
+  const fromOwnPage = (req) => {
+    const site = String(req.headers["sec-fetch-site"] || "");
+    if (site) return site === "same-origin";
+    try {
+      return new URL(String(req.headers.referer || "")).host === String(req.headers.host || "");
+    } catch {
+      return false;
+    }
+  };
+  const PAGES_ONLY = "Keys are handed only to SEASIDE's own pages, not to other programs.";
 
   const send = (res, code, body, type = "application/json") => {
     res.statusCode = code;
@@ -378,6 +409,23 @@ export function deskServer() {
     const parts = url.pathname.split("/").filter(Boolean).slice(1); // after "api"
     const m = req.method;
     const L = library();
+    // SEASIDE's own voices (omargVoices.mjs: the OMARG engine, sherpa-onnx), as a voice engine at /api/voices/v1/…
+    if (parts[0] === "voices" && parts[1] === "v1") {
+      voices ??= OV.createVoices(path.join(dataDir, "voices"));
+      try {
+        if (parts[2] === "models" && m === "GET") return send(res, 200, { object: "list", data: voices.packs().map((p) => ({ id: p.id, object: "model", owned_by: "seaside" })) });
+        if (parts[2] === "audio" && parts[3] === "voices" && m === "GET") return send(res, 200, { voices: voices.packs().flatMap((p) => p.voices.map((v) => ({ id: v.name, name: v.name, pack: p.id, lang: v.lang }))) });
+        if (parts[2] === "audio" && parts[3] === "speech" && m === "POST") {
+          const b = JSON.parse((await readBody(req, 200_000)).toString("utf8") || "{}");
+          const audio = await voices.speak({ input: b.input, voice: b.voice, speed: b.speed });
+          res.writeHead(200, { "Content-Type": "audio/wav", "Content-Length": audio.length });
+          return void res.end(audio);
+        }
+        return send(res, 404, { error: "No such voice route." });
+      } catch (e) {
+        return send(res, e?.status || 500, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
     // the module door (modules.mjs): looking in the Box and bringing modules in, from this computer or Tailscale's https
     if (parts[0] === "modules") {
       try {
@@ -438,6 +486,7 @@ export function deskServer() {
         const see = onThisPc(req) || viaTailnet(req);
         if (!parts[1] && m === "GET") return send(res, 200, { names: residentKeys.names(), canSee: see });
         if (!see) return send(res, 403, { error: "A character's keys are seen and set on the desktop's own computer, or over Tailscale's https." });
+        if (!fromOwnPage(req)) return send(res, 403, { error: PAGES_ONLY });
         const id = decodeURIComponent(parts[1] || "");
         if (parts[2] === "values" && m === "GET") return send(res, 200, { values: residentKeys.values(id) });
         if (!parts[2] && m === "PUT") {
@@ -450,6 +499,8 @@ export function deskServer() {
       }
     }
     if (parts[0] === "mcp-stdio") {
+      // (a character's own server starts with her keys: only her pages start, stop or talk to it)
+      if (!fromOwnPage(req)) return send(res, 403, { error: PAGES_ONLY });
       try {
         if (parts[1] === "rpc" && m === "POST") {
           const msg = JSON.parse((await readBody(req, 20_000_000)).toString("utf8") || "{}");
@@ -474,8 +525,17 @@ export function deskServer() {
         }
         if (parts[1] === "start" && m === "POST") {
           if (!stdioAllowed()[print]) return send(res, 403, { error: "This program hasn't been allowed yet.", print });
-          // the keys' values, filled in by the page from Keys, replace their ${NAME}s only now
-          const values = b.values ?? {};
+          // the keys' values replace their ${NAME}s only now: a character's own server gets her own keys first, read
+          // here from her sealed vault (they never pass through a page), then the household's Keys the page sent
+          // (whose it is was settled when it was allowed: a page can't claim it for someone else when starting it)
+          const owner = String(stdioAllowed()[print].owner || "");
+          let own = {};
+          try {
+            own = owner ? residentKeys.values(owner) : {};
+          } catch {
+            own = {};
+          }
+          const values = { ...(b.values ?? {}), ...own };
           const fill = (v) => String(v).replace(/\$\{([A-Za-z0-9_]+)\}/g, (_, n) => String(values[n] ?? process.env[n] ?? ""));
           return send(res, 200, stdio.start({ id: String(b.id || ""), command: asked.command, args: asked.args.map(fill), cwd: asked.cwd, env: Object.fromEntries(Object.entries(asked.env).map(([k, v]) => [k, fill(v)])) }));
         }
@@ -774,7 +834,7 @@ export function deskServer() {
         }
         // a folder watched where it is (a network share, a folder on this computer): added on the computer itself
         if (parts[1] === "folder" && m === "POST") {
-          if (!onThisPc(req)) return send(res, 403, { error: "Folders are added to the Theater on the desktop's own computer." });
+          if (!onThisPc(req)) return send(res, 403, { error: "Folders are added to the Theatre on the desktop's own computer." });
           const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
           return send(res, 200, b.drop ? theater.dropFolder(b.path) : theater.addFolder(files().allowed(b.path, true), b.name));
         }
@@ -789,6 +849,7 @@ export function deskServer() {
         if (parts[1] === "upload") {
           if (m === "GET") return send(res, 200, theater.uploadState(p));
           if (m === "DELETE") return send(res, 200, (theater.dropUpload(p), { ok: true }));
+          if (m === "POST" && p.whole) return send(res, 200, await theater.uploadWhole(p, req));
           if (m === "POST") return send(res, 200, theater.uploadPiece({ ...p, sha256: req.headers["x-sha256"] }, await readBody(req, PIECE_MAX)));
         }
         if (m === "POST") {
@@ -803,6 +864,8 @@ export function deskServer() {
           if (parts[1] === "playlist") return send(res, 200, b.drop ? theater.dropPlaylist(String(b.id || "")) : theater.savePlaylist(b));
           if (parts[1] === "collection") return send(res, 200, b.drop ? theater.dropCollection(String(b.id || "")) : theater.saveCollection(b));
           if (parts[1] === "move") return send(res, 200, { path: theater.moveTo(b.path, b.shelf) });
+          // a YouTube link onto a shelf (its title and thumbnail fetched once), or taken out
+          if (parts[1] === "link") return send(res, 200, b.drop ? theater.dropLink(String(b.id || "")) : await theater.addLink(String(b.url ?? ""), String(b.shelf ?? "")));
         }
       } catch (e) {
         return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
@@ -938,7 +1001,7 @@ export function deskServer() {
         return send(res, 200, await M.scan(folders));
       }
       if (parts[1] === "file") return M.serve(req, res, String(url.searchParams.get("id") || ""));
-      if (parts[1] === "cover") return void (await M.cover(res, String(url.searchParams.get("id") || "")));
+      if (parts[1] === "cover") return void (await M.cover(res, String(url.searchParams.get("id") || ""), req));
       if (parts[1] === "info") {
         const i = await M.info(String(url.searchParams.get("id") || ""));
         return i ? send(res, 200, i) : send(res, 404, { error: "That song isn't in the library." });
@@ -948,6 +1011,24 @@ export function deskServer() {
         try {
           const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
           return send(res, 200, M.rename(String(b.id || ""), b.name, { local: onThisPc(req) }));
+        } catch (e) {
+          return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      if (parts[1] === "engine-link" && m === "POST") {
+        try {
+          return send(res, 200, { id: engineStream.link(JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}")) });
+        } catch (e) {
+          return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      if (parts[1] === "engine-song" && parts[2]) return void (await engineStream.serve(req, res, String(parts[2])));
+      if (parts[1] === "fetch-song") {
+        try {
+          if (m === "POST") return send(res, 200, { id: songFetch().start(JSON.parse((await readBody(req, 2_000_000)).toString("utf8") || "{}")) });
+          if (m === "DELETE") return (songFetch().stop(String(parts[2] || "")), send(res, 200, { ok: true }));
+          const st = songFetch().status(String(parts[2] || ""));
+          return st ? send(res, 200, st) : send(res, 404, { error: "No such fetch (the desktop's server may have restarted)." });
         } catch (e) {
           return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
         }
@@ -1005,6 +1086,8 @@ export function deskServer() {
       }
     }
     if (parts[0] === "desk") {
+      // (the shared desk carries the household's Keys)
+      if (!fromOwnPage(req)) return send(res, 403, { error: PAGES_ONLY });
       try {
         if (m === "GET" && !parts[1]) return send(res, 200, { ...desk.get(Number(url.searchParams.get("since")) || 0), here: onThisPc(req) });
         // one section as it is now (a device going into a room)
@@ -1039,6 +1122,8 @@ export function deskServer() {
         if (parts[1] === "config" && m === "GET") return send(res, 200, { ...heart.status(), canChange: here });
         if (!here) return send(res, 403, { error: "Keeping them running is set up on the desktop's own computer." });
         if (parts[1] === "config" && m === "POST") return send(res, 200, heart.setConfig(JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}")));
+        // (the heart's copy of the desktop holds the keys)
+        if (parts[1] === "state" && !fromOwnPage(req)) return send(res, 403, { error: PAGES_ONLY });
         if (parts[1] === "state" && m === "GET") return send(res, 200, await heart.get({ forKeeper: url.searchParams.get("keeper") === "1", since: Number(url.searchParams.get("since")) || 0 }));
         // PUT from the page, POST from sendBeacon as the page closes
         if (parts[1] === "state" && (m === "PUT" || m === "POST")) {
@@ -1106,6 +1191,33 @@ export function deskServer() {
           return send(res, 200, L.importAny(f.bytes, f.name));
         } catch (e) {
           return send(res, 400, { error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      // a web game (its folder or .zip or page, sent or on the desktop) made into a Mini App, opened as a draft to edit
+      if (id === "import-web" && m === "POST") {
+        try {
+          let got;
+          let web = true;
+          if (String(req.headers["content-type"] || "").startsWith("application/json")) {
+            const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
+            // one of the built-in games (Games' own folder), or a path Explorer reaches
+            const games = path.join(publicDir, "games");
+            const p = b.game ? path.resolve(games, String(b.game)) : files().allowed(String(b.path || ""), onThisPc(req));
+            if (b.game && !p.startsWith(games + path.sep)) return send(res, 403, { error: "That isn't one of the games." });
+            web = b.web !== false;
+            got = fs.statSync(p).isDirectory() ? WG.readFolder(p) : WG.fromUpload(fs.readFileSync(p), path.basename(p));
+          } else {
+            web = req.headers["x-web"] !== "0";
+            got = WG.fromUpload(await readBody(req), decodeURIComponent(String(req.headers["x-filename"] || "game.zip")));
+          }
+          const made = WG.makeMiniApp(got.files, got.stem);
+          const fetched = web ? await WG.fetchLinked(made.files) : { kept: 0, bytes: 0 };
+          const still = WG.remoteRefs(made.files);
+          const r = L.importXdc(Buffer.from(zipSync(made.files, { level: 6 })), `${made.name}.xdc`);
+          const draft = L.fork(r.pkg.id, "0.1.0-draft");
+          return send(res, 200, { pkg: draft, base: r.pkg.id, name: made.name, done: made.done, fetched, still });
+        } catch (e) {
+          return send(res, e?.status || 400, { error: e instanceof Error ? e.message : String(e) });
         }
       }
       if (id === "import" && m === "POST") {
@@ -1241,10 +1353,45 @@ export function deskServer() {
         return send(res, 200, fs.readdirSync(dir, { withFileTypes: true }).map((e) => ({ name: e.name, dir: e.isDirectory(), size: e.isFile() ? fs.statSync(path.join(dir, e.name)).size : 0 })));
       }
     }
+    // games shared with linked SEASIDEs: the links, offering one, and answering an offer (see gameLinks.mjs)
+    if (parts[0] === "game-links") {
+      try {
+        if (m === "GET") return send(res, 200, { links: gameLinks.list(), servers: peers.list() });
+        const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
+        if (b.op === "offer") return send(res, 200, await gameLinks.offer(b));
+        if (b.op === "accept") return send(res, 200, await gameLinks.accept(String(b.id || "")));
+        if (b.op === "decline") return send(res, 200, await gameLinks.decline(String(b.id || "")));
+        if (b.op === "close") return send(res, 200, await gameLinks.close(String(b.id || "")));
+        return send(res, 400, { error: "Which change?" });
+      } catch (e) {
+        return send(res, e?.status || 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    // a game's realtime channel, across this SEASIDE's devices and any linked SEASIDE playing it
+    if (parts[0] === "rt" && parts[1]) {
+      const scope = decodeURIComponent(parts[1]);
+      if (parts[2] === "events" && m === "GET") return void gameLinks.listen(scope, String(url.searchParams.get("page") || ""), res);
+      if (m === "POST") {
+        const b = JSON.parse((await readBody(req, 8_000_000)).toString("utf8") || "{}");
+        gameLinks.realtime(scope, String(b.page || ""), b.msgs);
+        return send(res, 200, { ok: true });
+      }
+    }
     if (parts[0] === "state" && parts[1]) {
       const scope = parts[1];
       if (m === "GET") return send(res, 200, L.readUpdates(scope, Number(url.searchParams.get("since") || 0)));
-      if (m === "POST") return send(res, 200, L.appendUpdate(scope, JSON.parse((await readBody(req, 2_000_000)).toString("utf8"))));
+      if (m === "POST") {
+        const entry = JSON.parse((await readBody(req, 2_000_000)).toString("utf8"));
+        // a game linked from another SEASIDE: the move goes to its host, and comes back in the host's order
+        if (gameLinks.guestLink(scope)) {
+          try {
+            return send(res, 200, await gameLinks.sendAsGuest(scope, entry));
+          } catch (e) {
+            return send(res, 502, { error: e instanceof Error ? e.message : String(e) });
+          }
+        }
+        return send(res, 200, L.appendUpdate(scope, entry));
+      }
       if (m === "DELETE") {
         L.clearUpdates(scope);
         return send(res, 200, { ok: true });
@@ -1266,9 +1413,15 @@ export function deskServer() {
       if (rel === "webxdc.js") return send(res, 200, "/* webxdc is provided by PDA SEASIDE */", MIME.js);
       const q = url.searchParams;
       const inject = rel.endsWith(".html") || rel.endsWith(".htm")
-        ? webxdcScript({ scope: q.get("scope") || pkg.appKey, addr: q.get("addr") || "you", name: q.get("name") || "You", lan: lan() })
+        ? webxdcScript({ scope: q.get("scope") || pkg.appKey, addr: q.get("addr") || "you", name: q.get("name") || "You", lan: lan(), app: pkg.appKey })
         : "";
       return serveFile(res, L.fileOf(id, rel), inject);
+    }
+    // a game's adapter for characters' seats (public/game-adapters/<app>.js): served from the apps' own address
+    if (parts[0] === "game-adapters" && parts[1]) {
+      const file = path.resolve(publicDir, "game-adapters", path.basename(decodeURIComponent(parts[1])));
+      if (!file.endsWith(".js") || !fs.existsSync(file)) return send(res, 404, "", "text/plain");
+      return serveFile(res, file);
     }
     if (parts[0] === "games") {
       const rel = decodeURIComponent(parts.join("/"));
@@ -1362,6 +1515,7 @@ export function deskServer() {
       if (url.pathname.startsWith("/luanti-web/")) return void luantiWeb.serve(req, res, url, send);
       if (url.pathname.startsWith("/pads-peer/")) {
         deskPorts.add(req.socket.localPort);
+        if (await gameLinks.handle(req, res, url, { readBody, send })) return;
         if (await padsLink.handle(req, res, url, { readBody, send })) return;
       }
       // paired Classic pages (other origins, with their pairing token): hello, and the relay
@@ -1403,6 +1557,52 @@ export function deskServer() {
       // web pages for the Browser, on the apps' address (and in a sandboxed frame there)
       // (when shared on the network there's no separate apps' address; the page's own sandbox policy still holds)
       if (url.pathname === "/browse" && (isAppHost(req) || lan() || viaTailnet(req))) return void (await browser.serve(req, res, url));
+      // An app built to sit at the root of its own address (Vite's "/assets/…", as most Vector apps are) asks for root
+      // paths. Here every app shares one address under /run/<id>/, so those come from the app whose page asked (its
+      // Referer), and only ever from that app's own files; anything else on the apps' address stays as it was.
+      // the few things a few Mini Apps are made to fetch (appNet.mjs: the Learning Lab's courses), for those apps alone
+      if (isAppHost(req) && url.pathname === "/app-net/fetch" && req.method === "GET") {
+        const pkg = library().get(AN.askingPkg(req.headers.referer));
+        try {
+          const r = await AN.fetchFor(pkg?.appKey, String(url.searchParams.get("url") || ""));
+          return void send(res, r.status, r.text, "text/plain; charset=utf-8");
+        } catch (e) {
+          return void send(res, 502, e instanceof Error ? e.message : String(e), "text/plain; charset=utf-8");
+        }
+      }
+      // an app's voice through SEASIDE's own voices (omargVoices.mjs), for the apps given a voice (the Learning Lab's
+      // Lilith): the line comes back as WAV; which voice is the app's setting in voices/app-voices.json
+      if (isAppHost(req) && url.pathname === "/app-voice/speak" && req.method === "POST") {
+        const pkg = library().get(AN.askingPkg(req.headers.referer));
+        const voiceFor = OV.appVoice(path.join(dataDir, "voices"), pkg?.appKey);
+        if (!voiceFor) return void send(res, 403, { error: "This app has no voice." });
+        voices ??= OV.createVoices(path.join(dataDir, "voices"));
+        try {
+          const b = JSON.parse((await readBody(req, 50_000)).toString("utf8") || "{}");
+          const audio = await voices.speak({ input: b.text, voice: voiceFor, speed: b.rate });
+          res.writeHead(200, { "Content-Type": "audio/wav", "Content-Length": audio.length });
+          return void res.end(audio);
+        } catch (e) {
+          return void send(res, e?.status || 500, { error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      // a game's adapter for characters' seats is SEASIDE's own, not the app's: served before an app's root paths
+      if (isAppHost(req) && url.pathname.startsWith("/game-adapters/")) {
+        if (run(req, res, url) !== null) return;
+      }
+      if (isAppHost(req) && !url.pathname.startsWith("/run/") && !url.pathname.startsWith("/games/") && !url.pathname.startsWith("/game-adapters/") && url.pathname !== "/browse") {
+        // the folder the asking page lives in: "/run/<id>/", or a built-in game's "/games/<set>/<slug>/"
+        let home = "";
+        try {
+          const from = new URL(String(req.headers.referer || "")).pathname;
+          const app = /^\/run\/([^/]+)\//.exec(from);
+          const game = /^\/games\/([^/]+)\/([^/]+)\//.exec(from);
+          home = app ? `/run/${app[1]}/` : game ? `/games/${game[1]}/${game[2]}/` : "";
+        } catch {
+          /* no page, or not an address */
+        }
+        if (home && run(req, res, new URL(home + url.pathname.slice(1) + url.search, url)) !== null) return;
+      }
       if (url.pathname.startsWith("/run/") || (url.pathname.startsWith("/games/") && isAppHost(req))) {
         if (isDeskHost(req) && !lan()) return send(res, 403, "Apps run on their own address.", "text/plain");
         if (run(req, res, url) !== null) return;

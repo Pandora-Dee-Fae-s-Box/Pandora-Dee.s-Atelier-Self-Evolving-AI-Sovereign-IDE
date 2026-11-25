@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f7f3e9">
+  <title>Cat Club</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <button class="cat-picker" id="openCats" aria-label="Choose a cat">
+        <span class="mini-paw">🐾</span>
+        <span class="cat-title"><strong id="selectedName">Orange tabby</strong><small>your new friend</small></span>
+        <span class="chevron">⌄</span>
+      </button>
+      <div class="scene-controls">
+        <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">☾</button>
+        <label class="scene-picker" for="sceneSelect"><span>Scene</span><select id="sceneSelect" aria-label="Background scene">
+          <option value="pastel">Pastel daytime yard</option><option value="day">Daytime yard</option><option value="night">Nighttime yard</option><option value="white">Plain white</option><option value="black">Plain black</option><option value="plain">Plain background</option><option value="dance">Dance floor</option><option value="picnic">Picnic</option><option value="striped">House · striped walls</option><option value="walls">House · plain walls</option><option value="interior">Plain house interior</option><option value="polkadot">House · polkadot walls</option><option value="stripedplain">House · stripes, plain floor</option><option value="polkadotplain">House · dots, plain floor</option>
+        </select></label><label class="scene-colors-toggle"><input type="checkbox" id="showSceneColors" checked> Custom colors</label>
+      </div>
+    </header>
+
+    <section class="playground" id="playground" aria-label="Cat play area">
+      <div class="scene-floor" id="sceneFloor"><div class="checker-grid" id="checkerGrid" aria-hidden="true"></div></div>
+      <div class="picnic-blanket" id="picnicBlanket" aria-hidden="true"></div>
+      <div class="disco-hanger" id="discoHanger" aria-hidden="true"><span class="disco-string"></span><span class="disco-ball">🪩</span></div>
+      <div class="sun-glow"></div>
+      <div class="float-cloud cloud-one"></div><div class="float-cloud cloud-two"></div>
+      <div class="floor-shadow"></div>
+      <div class="scene-options" id="sceneOptions" hidden aria-label="Background colors">
+        <label id="plainColorControl" hidden>Color <input id="plainColor" type="color" value="#c8b8e8"></label>
+        <label id="wallColorControl" hidden>Walls <input id="wallColor" type="color" value="#efaaa4"></label>
+        <label id="stripeColorControl" hidden>Stripes <input id="stripeColor" type="color" value="#ffffff"></label>
+        <label id="dotColorControl" hidden>Dots <input id="dotColor" type="color" value="#ffffff"></label>
+        <label id="floorColorControl" hidden>Floor <input id="floorColor" type="color" value="#c98c63"></label>
+      </div>
+      <div class="cat-wrap" id="catWrap">
+        <img id="mainCat" class="main-cat" src="orange-tabby-cat.png" alt="Orange tabby cat" draggable="false">
+      </div>
+      <div class="head-effects" id="headEffects" aria-hidden="true">
+        <span class="love-heart">❤️</span>
+      </div>
+      <div class="pet-hand" id="petHand" aria-hidden="true">🤚</div>
+      <form class="hand-switch" id="handForm" hidden aria-label="Set petting hand emoji">
+        <input id="handEmoji" aria-label="Petting hand emoji" value="🤚" maxlength="8" autocomplete="off">
+        <button type="submit" aria-label="Set hand emoji">✓</button>
+      </form>
+      <div class="mode-hint" id="modeHint">Choose a little something to do</div>
+      <div class="toast" id="toast" aria-live="polite"></div>
+      <div class="food-tray" id="foodTray" hidden>
+        <div class="food-options" id="foodOptions"></div>
+        <form class="custom-food" id="customFoodForm">
+          <input id="customEmoji" aria-label="Add a food emoji" placeholder="🥕" maxlength="8" autocomplete="off">
+          <button type="submit" aria-label="Add custom food">+</button>
+        </form>
+        <span class="drag-note">drag a snack to your cat</span>
+      </div>
+      <div class="drag-food" id="dragFood" aria-hidden="true"></div>
+    </section>
+
+    <nav class="actions" aria-label="Cat interactions">
+      <button class="action-button" id="petButton" data-mode="pet"><span class="action-icon">🤚</span><span>Pet</span></button>
+      <button class="action-button" id="feedButton" data-mode="feed"><span class="action-icon">🍗</span><span>Feed</span></button>
+      <button class="action-button" id="cleanButton" data-mode="clean"><span class="action-icon" id="cleanIcon">🧽</span><span>Clean</span></button><div class="clean-items" id="cleanItems" hidden aria-label="Choose cleaning item"><button type="button" data-clean="🧽">🧽</button><button type="button" data-clean="🧼">🧼</button><button type="button" data-clean="🧴">🧴</button><button type="button" data-clean="🪥">🪥</button></div>
+      <button class="action-button" id="danceButton" data-mode="dance" hidden><span class="action-icon">🪩</span><span>Dance</span></button>
+      <button class="hint-toggle" id="hintToggle" type="button" aria-pressed="true">Hint on</button>
+      <div class="dance-moves" id="danceMoves" hidden aria-label="Dance moves">
+        <button type="button" data-move="up" aria-label="Hop up">⬆️</button><button type="button" data-move="left" aria-label="Slide left">⬅️</button><button type="button" data-move="right" aria-label="Slide right">➡️</button><button type="button" data-move="down" aria-label="Dip down">⬇️</button><button type="button" data-move="tilt-right" aria-label="Tilt right">↗️</button><button type="button" data-move="tilt-left" aria-label="Tilt left">↖️</button><button type="button" data-move="spin" aria-label="Spin clockwise">🔁</button><button type="button" data-move="spin-reverse" aria-label="Spin counterclockwise">🔁2</button><button type="button" data-move="shrink" aria-label="Shrink">⏬️</button><button type="button" data-move="grow" aria-label="Grow">⏫️</button><button type="button" data-move="shake" aria-label="Shake">📳</button>
+        <button type="button" class="assemble-dance-button" id="assembleDanceButton">＋ Assemble dance</button>
+      </div>
+      <section class="dance-builder" id="danceBuilder" hidden aria-label="Assemble dance">
+        <div class="assembled-sequence" id="assembledSequence" aria-live="polite"></div>
+        <div class="builder-moves" id="builderMoves" aria-label="Add a move"></div>
+        <div class="builder-actions"><button type="button" class="play-dance-button" id="playDance">▶ Play</button><button type="button" class="stop-dance-button" id="stopDance" hidden>■ Stop</button><button type="button" class="clear-dance-button" id="clearDance">Clear</button></div>
+      </section>
+    </nav>
+
+    <section class="cat-modal" id="catModal" hidden aria-label="Choose a cat">
+      <button class="modal-backdrop" id="closeCats" aria-label="Close cat chooser"></button>
+      <div class="modal-card">
+        <div class="modal-head"><span>Pick your cat</span><button class="close-button" id="closeCatsX" aria-label="Close">×</button></div>
+        <div class="cat-sort-tools"><label for="catSortPreset">Order <select id="catSortPreset" aria-label="Sort cats"><option value="Default">Default</option><option value="A-Z">A-Z</option><option value="Z-A">Z-A</option><option value="Color-based">Color-based</option><option value="Custom">Custom order</option></select></label><button type="button" id="toggleSortMode" class="draw-open-button">↕ Sort cats</button><label class="sort-adjacent"><input id="sortAdjacent" type="checkbox"> Place beside</label><span id="sortStatus" aria-live="polite"></span></div><div id="colorOrderTools" class="color-order-tools" hidden aria-label="Choose color sort order"></div>
+        <form class="create-cat" id="createCatForm">
+          <div class="create-cat-heading">Make a cat</div>
+          <div class="create-cat-fields">
+            <input id="newCatName" aria-label="Cat name" placeholder="Name your cat" maxlength="24" required>
+            <select id="newCatBase" aria-label="Base cat"></select>
+          </div>
+          <label class="size-control" for="newCatSize">Size <select id="newCatSize" aria-label="New cat size"><option value="adult">Adult</option><option value="kitten">Kitten</option></select></label>
+          <div class="tint-controls">
+            <label class="color-control">Color <input id="newCatColor" type="color" value="#d879b5"></label>
+            <label class="opacity-control">Opacity <input id="newCatOpacity" type="range" min="0" max="100" value="45"><span id="opacityValue">45%</span></label>
+          </div>
+          <label class="grayscale-control"><input id="newCatGrayscale" type="checkbox"> Grayscale base image</label>
+          <label class="grayscale-control"><input id="newCatSolidColor" type="checkbox"> Color shades</label>
+          <label class="grayscale-control shade-option" id="matchCatShadesWrap" hidden><input id="matchCatShades" type="checkbox"> Match base brightness</label>
+          <label class="grayscale-control shade-option" id="lightenCatHighlightsWrap" hidden><input id="lightenCatHighlights" type="checkbox"> Lighten highlights</label>
+          <label class="custom-color-count">Count this custom cat as <select id="newCatSortColor" aria-label="Color category for custom cat"><option value="auto">Auto · most common color</option><option value="red">Red</option><option value="orange">Orange</option><option value="yellow">Yellow</option><option value="green">Green</option><option value="blue">Blue</option><option value="purple">Purple</option><option value="pink">Pink</option><option value="brown">Brown</option><option value="black">Black</option><option value="grey">Grey</option><option value="strict-grey">Grey (not greyish colors)</option><option value="white">White</option><option value="other">Other / non-specific</option></select></label>
+          <div class="create-cat-bottom"><img id="newCatPreview" alt="Custom cat preview"><button type="button" id="openDraw" class="draw-open-button">✎ Draw</button><button type="button" id="openAIDraw" class="draw-open-button">✦ AI Draw</button><button type="submit" class="create-cat-button">＋ Create cat</button></div>
+          <div class="ai-draw-panel" id="aiDrawPanel" hidden>
+            <label for="aiDrawPrompt">What should the AI draw on your cat?</label>
+            <textarea id="aiDrawPrompt" rows="2" maxlength="240" placeholder="A tiny blue star on its cheek"></textarea>
+            <div class="ai-draw-actions"><button type="button" id="generateAIDrawing" class="create-cat-button">Generate</button><span id="aiDrawStatus" aria-live="polite"></span></div>
+            <div class="ai-draw-result" id="aiDrawResult" hidden>
+              <img id="aiDrawResultImage" alt="AI drawing preview">
+              <div class="ai-result-actions"><button type="button" id="useAIDrawing" class="create-cat-button">Use result</button><button type="button" id="regenerateAIDrawing" class="draw-open-button">Regenerate</button><button type="button" id="discardAIDrawing" class="draw-open-button">Not use</button></div>
+            </div>
+          </div>
+        </form>
+        <div class="cat-grid" id="catGrid"></div>
+      </div>
+    </section>
+
+    <section class="draw-modal" id="drawModal" hidden aria-label="Draw on your custom cat">
+      <button class="modal-backdrop" id="drawBackdrop" aria-label="Close drawing editor"></button>
+      <div class="draw-card">
+        <div class="modal-head"><span>Draw on your cat</span><button class="close-button" id="closeDraw" type="button" aria-label="Close drawing editor">×</button></div>
+        <div class="zoom-controls" aria-label="Drawing zoom"><button type="button" id="zoomOut" aria-label="Zoom out">−</button><span id="zoomValue">100%</span><button type="button" id="zoomIn" aria-label="Zoom in">＋</button><button type="button" id="zoomReset">Reset</button><button type="button" id="panCanvasButton" aria-pressed="false" disabled>✋ Move</button></div><div class="draw-canvas-wrap"><canvas id="drawCanvas" width="640" height="460" aria-label="Drawing canvas"></canvas></div>
+        <div class="draw-tools">
+          <div class="draw-tool-buttons"><button type="button" id="drawTool" class="draw-tool active">Draw</button><button type="button" id="eraseTool" class="draw-tool">Erase drawing</button><button type="button" id="eraseImageTool" class="draw-tool">Erase image</button><button type="button" id="pickColorTool" class="draw-tool">◉ Pick</button><span class="tool-divider"></span><button type="button" id="undoDraw" class="history-button" aria-label="Undo">↶</button><button type="button" id="redoDraw" class="history-button" aria-label="Redo">↷</button><button type="button" id="clearDrawing" class="clear-drawing-button">Clear drawing</button></div>
+          <div class="brush-controls">
+            <label>Brush color <input id="brushColor" type="color" value="#34463c"></label>
+            <label>Opacity <input id="brushOpacity" type="range" min="1" max="100" value="100"><span id="brushOpacityValue">100%</span></label>
+            <label>Size <input id="brushSize" type="range" min="2" max="64" value="18"><span id="brushSizeValue">18</span></label>
+          </div>
+          <div class="color-target-controls">
+            <label for="drawOnlyColor">Draw only on</label>
+            <select id="drawOnlyColor" aria-label="Draw only on color">
+              <option value="all">All colors</option><option value="red">Red</option><option value="orange">Orange</option><option value="yellow">Yellow</option><option value="green">Green</option><option value="blue">Blue</option><option value="purple">Purple</option><option value="pink">Pink</option><option value="brown">Brown</option><option value="peach">Peach</option><option value="black">Black</option><option value="grey">Grey</option><option value="strict-grey">Grey (not greyish colors)</option><option value="white">White</option><option value="custom">Custom color…</option>
+            </select>
+            <label for="avoidColor">Avoid color</label><select id="avoidColor" aria-label="Avoid color"><option value="none">None</option><option value="red">Red</option><option value="orange">Orange</option><option value="yellow">Yellow</option><option value="green">Green</option><option value="blue">Blue</option><option value="purple">Purple</option><option value="pink">Pink</option><option value="brown">Brown</option><option value="peach">Peach</option><option value="black">Black</option><option value="grey">Grey</option><option value="strict-grey">Grey (not greyish colors)</option><option value="white">White</option><option value="custom">Custom color…</option></select><label id="avoidTargetColorWrap" hidden>Match <input id="avoidTargetColor" type="color" value="#d879b5"></label><button type="button" id="pickAvoidTargetColor" class="target-pick-button" hidden>◉ Pick from image</button><label id="avoidTargetToleranceWrap" hidden>Similarity <input id="avoidTargetTolerance" type="range" min="0" max="100" value="70"><span id="avoidTargetToleranceValue">70%</span></label><label id="customTargetColorWrap" hidden>Match <input id="drawTargetColor" type="color" value="#d879b5"></label><button type="button" id="pickTargetColor" class="target-pick-button" hidden>◉ Pick from image</button>
+            <label id="customTargetToleranceWrap" hidden>Similarity <input id="drawTargetTolerance" type="range" min="0" max="100" value="70"><span id="drawTargetToleranceValue">70</span></label>
+          </div>
+          <div class="draw-toggles"><label><input id="avoidEyes" type="checkbox"> Avoid eyes</label><label><input id="onlyEyes" type="checkbox"> Draw only on eyes</label><label><input id="clipNewStrokes" type="checkbox"> Keep new strokes inside cat</label><label><input id="shadeNewStrokes" type="checkbox"> Color-shade new strokes</label><label class="shade-option" id="matchStrokeShadesWrap" hidden><input id="matchStrokeShades" type="checkbox"> Match base brightness</label><label class="shade-option" id="lightenStrokeHighlightsWrap" hidden><input id="lightenStrokeHighlights" type="checkbox"> Lighten highlights</label><label><input id="noOpacityOverlap" type="checkbox"> Low-opacity strokes don’t build up</label><label><input id="ignoreDrawnForShade" type="checkbox" checked> Ignore drawn parts when color shading</label><label><input id="countDrawnParts" type="checkbox"> Color filters count drawn parts</label><label><input id="avoidDrawnParts" type="checkbox"> Don’t draw over drawn parts</label></div>
+        </div>
+        <div class="draw-footer"><span id="drawStatus">New settings affect new strokes only</span><button type="button" id="doneDrawing" class="create-cat-button">Done</button></div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

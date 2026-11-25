@@ -1,4 +1,4 @@
-// Linked folders: a folder somewhere else (a network share like \\ALICEMOVIES\texts, or any folder on this computer)
+// Linked folders: a folder somewhere else (a network share like \\MEDIA-PC\texts, or any folder on this computer)
 // that characters can read as part of their files, under library/<name>/…, without it being copied into SEASIDE.
 // Read-only: they list, read and search it; it stays where it is. A link is made on the desktop's own computer (it
 // decides what this computer reads); the characters can read through it from any device.

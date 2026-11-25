@@ -135,7 +135,7 @@ export type PromptContext = {
   files: Record<string, string>;
   room: Character[];
   people: string[];
-  game?: { title: string; players: string[]; screen?: string; xdc?: boolean };
+  game?: { title: string; players: string[]; screen?: string; xdc?: boolean; guide?: string };
   now: Date;
   length?: "short" | "normal" | "long";
   /** Summary of the earlier part of a compacted conversation. */
@@ -146,6 +146,8 @@ export type PromptContext = {
   memoryFocus?: { query: string; k: number; keep?: string[] };
   /** What's happening around the desktop (the cats), a line or two. */
   around?: string;
+  /** Only the steady half (promptParts gives the changing half too). */
+  apart?: boolean;
 };
 
 const STOP = new Set("the and for are but not you your yours with this that what when where which who will would could should have has had was were been being from they them their there here then than into onto about just also very really like some any all can its it's i'm i've don't didn't does did our out".split(" "));
@@ -209,26 +211,45 @@ export function systemPrompt(ctx: PromptContext): string {
   // SYSTEM.md, when a character has one, replaces the desktop's own instructions.
   const own = stripComments(files["SYSTEM.md"] ?? "");
   if (own) parts.push(own);
+  // What stays the same from turn to turn comes first, what changes comes after: a model runs through the prompt in
+  // order, and one on a computer here (Ollama) can reuse its work on the part that matches the last turn's, so a
+  // stable start means it reads only what's new (seconds instead of half a minute on a 32B model).
   parts.push(stripComments(files["SOUL.md"] ?? `# ${me.name}`));
   if (files["AGENTS.md"]) parts.push(stripComments(files["AGENTS.md"]));
+  const skills = skillsNote(files, Boolean(ctx.skillRouter));
+  if (skills) parts.push(skills);
+  const people = ctx.people.length ? ctx.people.join(", ") : "someone at the computer";
+  const steady = [
+    `## Where you are`,
+    `You are ${me.name}${me.short !== me.name ? ` ("${me.short}")` : ""}, in a shared room in PDA SEASIDE, running on ${people}'s computer.`,
+    // where she lives, as plain fact: the project she might find on the web is the one she's running in
+    `About where you are: PDA SEASIDE is Pandora Dee's Atelier, the Self-aware Evolving Adaptive Sovereign IDE, a desktop built by AETHER-ENGINEERS that people and characters share. Its code is open at github.com/AETHER-ENGINEERS/Pandora-Dee.s-Atelier-Self-Aware-Evolving-Adaptive-Sovereign-IDE. It's working right now: this conversation, your files, your tools and your browser all run in it.`,
+  ];
+  if (!own)
+    steady.push(
+      `Messages from others arrive as "Name: text". Speak only as yourself: never write lines for anyone else, and don't start your reply with your own name.`,
+      ctx.length === "short"
+        ? `This is a live conversation. Keep replies short: a sentence or two unless someone asks for more.`
+        : ctx.length === "long"
+          ? `This is a live conversation, and you like to give full answers: take the room you need to explain, tell the story, or show your reasoning.`
+          : `This is a live conversation. Keep replies conversational and reasonably short unless someone asks for depth.`,
+    );
+  parts.push(steady.join("\n"));
+  const steadyCount = parts.length;
+
+  // what changes: the memory that fits this moment, the desk around her, her journal, who's here, the time, a game
   const whole = stripComments(files["MEMORY.md"] ?? "");
   const memory = ctx.memoryFocus ? rankMemory(whole, ctx.memoryFocus.query, ctx.memoryFocus.k, ctx.memoryFocus.keep) : whole;
   if (memory) parts.push(`## My memory\n${memory}`);
   if (ctx.around) parts.push(`## Around the desktop\n${ctx.around}`);
   const journal = latestJournal(files);
   if (journal) parts.push(`## My latest journal entry\n${journal.slice(0, 2500)}`);
-  const skills = skillsNote(files, Boolean(ctx.skillRouter));
-  if (skills) parts.push(skills);
 
   const here = others.length
     ? others.map((c) => `- ${c.short}${c.short !== c.name ? ` (${c.name})` : ""}: ${c.tagline || "another character"}`).join("\n")
     : "- No other characters right now.";
-  const people = ctx.people.length ? ctx.people.join(", ") : "someone at the computer";
   const lines = [
     `## Right now`,
-    `You are ${me.name}${me.short !== me.name ? ` ("${me.short}")` : ""}, in a shared room in PDA SEASIDE, running on ${people}'s computer.`,
-    // where she lives, as plain fact: the project she might find on the web is the one she's running in
-    `About where you are: PDA SEASIDE is Pandora Dee's Atelier, the Self-aware Evolving Adaptive Sovereign IDE, a desktop built by AETHER-ENGINEERS that people and characters share. Its code is open at github.com/AETHER-ENGINEERS/Pandora-Dee.s-Atelier-Self-Aware-Evolving-Adaptive-Sovereign-IDE. It's working right now: this conversation, your files, your tools and your browser all run in it.`,
     `Local time for them: ${ctx.now.toLocaleString(undefined, { weekday: "long", hour: "2-digit", minute: "2-digit", month: "long", day: "numeric" })}.`,
     `Other characters in the room:\n${here}`,
     `People in the room: ${people}.`,
@@ -236,24 +257,41 @@ export function systemPrompt(ctx: PromptContext): string {
   if (ctx.game) {
     lines.push(`A game is open: "${ctx.game.title}". Playing together: ${ctx.game.players.join(", ")}.`);
     if (ctx.game.screen) lines.push(`What the game screen shows right now:\n"""\n${ctx.game.screen.slice(0, 1500)}\n"""`);
+    // a Vector app is played for real: its moves go through the tools, so a move only described in words isn't made
+    if (ctx.game.xdc) lines.push(`You're a real player in it: app_updates shows the game's state, and app_send_update makes your move. A move you only describe in words isn't made, so when it's your turn, send it, then say a line about it.`);
+    if (ctx.game.guide) lines.push(`How to play it (the game's guide):\n${ctx.game.guide}`);
   }
-  if (!own) lines.push(
-    `Messages from others arrive as "Name: text". Speak only as yourself: never write lines for anyone else, and don't start your reply with your own name.`,
-    ctx.length === "short"
-      ? `This is a live conversation. Keep replies short: a sentence or two unless someone asks for more.`
-      : ctx.length === "long"
-        ? `This is a live conversation, and you like to give full answers: take the room you need to explain, tell the story, or show your reasoning.`
-        : `This is a live conversation. Keep replies conversational and reasonably short unless someone asks for depth.`,
-  );
   parts.push(lines.join("\n"));
   if (ctx.summary) parts.push(`## Earlier in this conversation (summarised)\n${ctx.summary}`);
 
-  let prompt = parts.join("\n\n");
-  if (prompt.length > BUDGET) prompt = prompt.slice(0, BUDGET);
-  return prompt;
+  // a model on a computer here gets the changing half apart (see promptParts), so the steady half stays the same
+  if (ctx.apart) return clip(parts.slice(0, steadyCount).join("\n\n"));
+  return clip(parts.join("\n\n"));
+}
+
+const clip = (prompt: string) => (prompt.length > BUDGET ? prompt.slice(0, BUDGET) : prompt);
+
+/** The system prompt in two halves: what stays the same from turn to turn, and what changes (memory for this moment,
+ *  the desk around her, her journal, who's here, the time, a game). For a model on a computer here, the changing half
+ *  goes in a note at the start of the conversation instead: Ollama puts the tools after the system prompt, so anything
+ *  changing there makes it read the tools again every turn. */
+export function promptParts(ctx: PromptContext): { steady: string; moment: string } {
+  const steady = systemPrompt({ ...ctx, apart: true });
+  const whole = systemPrompt({ ...ctx, apart: false });
+  return { steady, moment: whole.startsWith(steady) ? whole.slice(steady.length).trim() : whole };
 }
 
 export type ChatTurn = { role: "system" | "user" | "assistant"; content: string };
+
+/** The most of one character's reply that goes back into a prompt. A long game turn can leave a reply of tens of
+ *  thousands of characters (Dee's Vexel turns, 2026-11-20: up to 220,000); whole, one of those fills a local model's
+ *  window and the server quietly cuts the rest. Its start and its end are kept (the end is where it landed). */
+export const REPLY_MAX = 6000;
+export function shortened(text: string, max = REPLY_MAX): string {
+  if (text.length <= max) return text;
+  const head = Math.floor(max * 0.35), tail = max - head;
+  return `${text.slice(0, head).trimEnd()}\n\n[… ${(text.length - head - tail).toLocaleString("en")} characters of this reply left out here …]\n\n${text.slice(-tail).trimStart()}`;
+}
 
 /**
  * Turn the shared transcript into a conversation from one character's point of view.
@@ -272,13 +310,13 @@ export function transcriptFor(me: Character, history: Message[], limit = 40, cha
     } else if (m.kind === "character" && m.who === me.id) {
       // her earlier reply, then the desk's record of what actually ran in it, as the desk's own line (inside her reply
       // a model learns to write it herself)
-      const said = stripRecords(m.text).trim();
+      const said = shortened(stripRecords(m.text).trim());
       turns.push({ role: "assistant", content: opts.stamp ? `${stamp(m)}${said}` : said });
       const record = recordLine(m.tools, m.text);
       if (record) turns.push({ role: "user", content: record });
     } else {
       const via = m.source === "desk" ? "" : ` (via ${m.source === "discord" ? "Discord" : "Vector"})`;
-      turns.push({ role: "user", content: `${stamp(m)}${m.name}${via}: ${m.text}${attachmentNote(m.files)}` });
+      turns.push({ role: "user", content: `${stamp(m)}${m.name}${via}: ${m.kind === "character" ? shortened(m.text) : m.text}${attachmentNote(m.files)}` });
     }
   }
   return turns;
@@ -339,6 +377,8 @@ export function tidyReply(me: Character, raw: string, room: Character[]): string
   const words = me.name.split(/\s+/).filter((w) => w.length >= 3);
   const own = [...new Set([me.name, me.short, ...words])].sort((x, y) => y.length - x.length).map(escape).join("|");
   text = text.replace(new RegExp(`^\\s*\\**(${own})\\**\\s*:\\s*\\**\\s*`, "i"), "");
+  // a transcript's role label ("You:", from GLM on Ollama): the words after it are still hers
+  text = text.replace(/^\s*\**(You|User|Assistant)\**\s*:\s*\**\s*/i, "");
   const others = room.filter((c) => c.id !== me.id).flatMap((c) => [c.name, c.short]).map(escape);
   // a reply that opens as someone else ("Dee: …") is written for them, not by this character: it's a pass
   if (others.length && new RegExp(`^\\s*\\**(${others.join("|")})\\**\\s*:`, "i").test(text)) return "";

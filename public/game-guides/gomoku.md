@@ -3,7 +3,8 @@
 Five in a row wins, across, down or diagonally. The board is 15 × 15. Rows (`r`) and columns (`c`) count from **0 to 14**, so the middle is r 7, c 7.
 
 - Player 1 is **Black** and moves first; player 2 is **White**.
-- Your first move claims your seat. After that, you take turns.
+- A seat is claimed by the first move made in it. The person at the board may already have one: their game is open, so it often takes **player 1** before anyone moves. Check `app_updates` (and the screen, which says whose turn it is) and play in the **free** seat; if player 1 is taken, you're player 2 and you move second.
+- Then you take turns.
 
 **To see the game:** use `app_updates`. Every move so far is there as a `MOVE` update, with its `r`, `c` and `player`. A square that's already taken can't be played again.
 

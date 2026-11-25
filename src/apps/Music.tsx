@@ -1,12 +1,12 @@
+import { groupAlbums } from "../lib/albumGroups.ts";
 import { toCss } from "../lib/zoom.ts";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, FileDown, FileUp, FolderInput, ListPlus, Pencil, Plus, X, AudioWaveform, ChevronUp, ChevronsRight, Disc3, Folder, FolderOpen, FolderPlus, Globe2, ListMusic, Maximize2, Mic2, MonitorSmartphone, Pause, Play, Radio, Repeat, Repeat1, Search, Shuffle, SkipBack, Sparkles, SkipForward, Star, Trash2, Upload, Users, Volume2 } from "lucide-react";
+import { Link2, ArrowDown, ArrowUp, FileDown, FileUp, FolderInput, ListPlus, Pencil, Plus, X, AudioWaveform, ChevronUp, ChevronsLeft, ChevronsRight, Disc3, Folder, FolderOpen, FolderPlus, Globe2, ListMusic, Maximize2, Mic2, MonitorSmartphone, Pause, Play, Radio, Repeat, Repeat1, Search, Shuffle, SkipBack, Sparkles, SkipForward, Star, Trash2, Upload, Users, Volume2 } from "lucide-react";
 import { desk, useDesk } from "../lib/store.ts";
 import {
   addFiles,
   coverOf,
   current,
-  enqueue,
   findStations,
   forgetStation,
   loadLibrary,
@@ -26,7 +26,12 @@ import {
   shuffled,
   albumOrder,
   skipBy,
+  backBy,
+  playAt,
+  removeAt,
+  queueAs,
 } from "../lib/music.ts";
+import { QUEUE_WHERE, WHERE_LABEL } from "../lib/queueOps.ts";
 import { Num } from "../ui/Num.tsx";
 import { copyToServer, shareMusicFiles, shareMusicFolder, thisDevice, useServerName, useSharedLibraries, AUDIO } from "../lib/musicShare.ts";
 import { canShareFolder, stopSharing, useMyShares } from "../lib/devshare.ts";
@@ -47,6 +52,8 @@ type View = "songs" | "make" | "albums" | "artists" | "world" | "radio" | "find"
 const time = (s: number) => (Number.isFinite(s) && s > 0 ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}` : "–:––");
 const setPrefs = (p: Partial<ReturnType<typeof desk>["music"]>) => desk().set({ music: { ...desk().music, ...p } });
 const asItems = (ts: Track[]): Item[] => ts.map((t) => ({ kind: "track", ...t }));
+/** Play next in queue, Play last in queue, Play after the current album: for songs, an album, an artist or stations. */
+const queueMenu = (items: Item[]): MenuItem[] => QUEUE_WHERE.map((w) => ({ label: WHERE_LABEL[w], disabled: !items.length, run: () => void queueAs(items, w) }));
 /** Past the rest of this album, or this artist, in the queue (playing by artist or album, or albums shuffled). */
 const skip = (by: "album" | "artist") => {
   const said = skipBy(by);
@@ -55,6 +62,15 @@ const skip = (by: "album" | "artist") => {
 const skipMenu = (): MenuItem[] => [
   { label: "Skip to the next album", run: () => skip("album") },
   { label: "Skip to the next artist", run: () => skip("artist") },
+];
+/** Back to the start of the album, or artist, before this one in the queue. */
+const back = (by: "album" | "artist") => {
+  const said = backBy(by);
+  if (said) desk().say(said);
+};
+const backMenu = (): MenuItem[] => [
+  { label: "Back to the previous album", run: () => back("album") },
+  { label: "Back to the previous artist", run: () => back("artist") },
 ];
 
 export function MusicApp() {
@@ -79,7 +95,9 @@ export function MusicApp() {
   const songs = useMemo(() => searchLibrary(q, Infinity), [q, m.tracks]); // eslint-disable-line react-hooks/exhaustive-deps
   // the songs list draws a few hundred at a time and adds more as you scroll near the end
   const [shown, setShown] = useState(PAGE);
-  useEffect(() => setShown(PAGE), [q]);
+  useEffect(() => {
+    setShown(PAGE);
+  }, [q]);
   const more = useRef<HTMLTableRowElement>(null);
   useEffect(() => {
     const el = more.current;
@@ -88,14 +106,7 @@ export function MusicApp() {
     io.observe(el);
     return () => io.disconnect();
   }, [shown, songs, view]);
-  const albums = useMemo(() => {
-    const map = new Map<string, Track[]>();
-    for (const t of songs) {
-      const k = `${t.album || "Singles"}\u0000${t.album ? t.artist : ""}`;
-      map.set(k, [...(map.get(k) ?? []), t]);
-    }
-    return [...map.entries()].map(([k, ts]) => ({ key: k, name: k.split("\u0000")[0], artist: k.split("\u0000")[1] || ts[0]?.artist || "", tracks: ts.sort((a, b) => a.track - b.track), cover: ts.find((t) => t.cover) }));
-  }, [songs]);
+  const albums = useMemo(() => groupAlbums(songs), [songs]);
   const artists = useMemo(() => {
     const map = new Map<string, Track[]>();
     for (const t of songs) map.set(t.artist || "Unknown artist", [...(map.get(t.artist || "Unknown artist") ?? []), t]);
@@ -103,16 +114,38 @@ export function MusicApp() {
   }, [songs]);
 
   const cur = current();
+  /** A song's Properties (with the made-song details when it was made here). */
+  const infoOf = (t: Track) => openSongInfo({ track: t, made: desk().media.made.find((s) => s.file.replace(/\.[^.]+$/, "") === t.title || s.title === t.title) });
+  /** The song playing, from the player: no need to find it in the library. */
+  const nowMenu = (): MenuItem[] => {
+    const it = current();
+    if (!it) return [];
+    if (it.kind !== "track")
+      return [
+        { heading: it.name },
+        { label: "Copy the station's name", run: () => void copyText(it.name) },
+        { label: prefs.showQueue ? "Hide the queue" : "Show the queue", run: () => setPrefs({ showQueue: !prefs.showQueue }) },
+      ];
+    const key = groupAlbums(m.tracks).find((a) => a.tracks.some((t) => t.id === it.id))?.key;
+    return [
+      { heading: it.title },
+      { label: "Properties…", run: () => infoOf(it) },
+      ...(key ? [{ label: "Show its album", run: () => (setView("albums"), setAlbum(key)) } as MenuItem] : []),
+      { label: "Copy title and artist", run: () => void copyText(`${it.title}${it.artist ? ` · ${it.artist}` : ""}`) },
+      ...addToPlaylistItems(it, openList),
+      { sep: true },
+      { label: prefs.showQueue ? "Hide the queue" : "Show the queue", run: () => setPrefs({ showQueue: !prefs.showQueue }) },
+    ];
+  };
   const trackMenu = (list: Track[], i: number): MenuItem[] => [
     { label: "Play", run: () => playList(asItems(list), i) },
-    { label: "Play next", run: () => useMusic.setState((s) => ({ queue: [...s.queue.slice(0, s.index + 1), { kind: "track", ...list[i] }, ...s.queue.slice(s.index + 1)] })) },
-    { label: "Add to the queue", run: () => enqueue(asItems([list[i]])) },
+    ...queueMenu(asItems([list[i]])),
     { sep: true },
     { label: "Copy title and artist", run: () => void copyText(`${list[i].title}${list[i].artist ? ` · ${list[i].artist}` : ""}`) },
     ...(list[i].src ? [] : [{ sep: true } as MenuItem, { label: "Rename…", icon: <Pencil size={14} />, run: () => void renameSong(list[i]) } as MenuItem]),
     ...addToPlaylistItems(list[i], openList),
     { sep: true },
-    { label: "Properties…", run: () => openSongInfo({ track: list[i], made: desk().media.made.find((s) => s.file.replace(/\.[^.]+$/, "") === list[i].title || s.title === list[i].title) }) },
+    { label: "Properties…", run: () => infoOf(list[i]) },
   ];
 
   // the visualizer's choices: from the player's footer, and from the sidebar (where phones can reach them)
@@ -293,11 +326,11 @@ export function MusicApp() {
                   if (!a) return null;
                   return (
                     <div className="album-view">
-                      <div className="album-head">
+                      <div className="album-head" onContextMenu={(e) => openMenu(e, [{ heading: a.name }, { label: "Play", run: () => playList(asItems(a.tracks)) }, ...queueMenu(asItems(a.tracks))])}>
                         {a.cover ? <img src={`/api/music/cover?id=${a.cover.id}`} alt="" /> : <div className="no-cover"><Disc3 size={40} /></div>}
                         <div>
                           <h3 style={{ margin: 0 }}>{a.name}</h3>
-                          <div className="muted">{a.artist}</div>
+                          <div className="muted">{[a.artist, a.label].filter(Boolean).join(" · ")}</div>
                           <button className="btn primary small" style={{ marginTop: 8 }} onClick={() => playList(asItems(a.tracks))}>
                             <Play size={13} /> Play
                           </button>
@@ -314,10 +347,17 @@ export function MusicApp() {
               ) : (
                 <div className="albums">
                   {albums.map((a) => (
-                    <button key={a.key} className="album" onClick={() => setAlbum(a.key)} onDoubleClick={() => playList(asItems(a.tracks))}>
+                    <button
+                      key={a.key}
+                      className="album"
+                      onClick={() => setAlbum(a.key)}
+                      onDoubleClick={() => playList(asItems(a.tracks))}
+                      onContextMenu={(e) => openMenu(e, [{ heading: a.name }, { label: "Play", run: () => playList(asItems(a.tracks)) }, ...queueMenu(asItems(a.tracks)), { sep: true }, { label: "Open", run: () => setAlbum(a.key) }])}
+                    >
                       {a.cover ? <img src={`/api/music/cover?id=${a.cover.id}`} alt="" loading="lazy" /> : <div className="no-cover"><Disc3 size={34} /></div>}
                       <b>{a.name}</b>
                       <span className="faint small">{a.artist}</span>
+                      {a.label ? <span className="faint small album-copy" title={a.label}>{a.label}</span> : null}
                     </button>
                   ))}
                 </div>
@@ -326,7 +366,12 @@ export function MusicApp() {
 
             {view === "artists"
               ? artists.map(([name, ts]) => (
-                  <div key={name} className="artist-row" onDoubleClick={() => playList(asItems(albumOrder(ts)), 0, true)}>
+                  <div
+                    key={name}
+                    className="artist-row"
+                    onDoubleClick={() => playList(asItems(albumOrder(ts)), 0, true)}
+                    onContextMenu={(e) => openMenu(e, [{ heading: name }, { label: "Play", run: () => playList(asItems(albumOrder(ts)), 0, true) }, ...queueMenu(asItems(albumOrder(ts)))])}
+                  >
                     <Mic2 size={14} className="faint" /> <b>{name}</b> <span className="faint small">{ts.length} songs</span>
                     <span className="grow" />
                     <button className="btn small" onClick={() => playList(asItems(albumOrder(ts)), 0, true)}>
@@ -348,9 +393,10 @@ export function MusicApp() {
       </div>
 
       <SongInfoHost />
+      {prefs.showQueue ? <QueueView onClose={() => setPrefs({ showQueue: false })} infoOf={infoOf} /> : null}
       <footer className="now-playing">
-        <div className="np-art">{cur && coverOf(cur) ? <img src={coverOf(cur)} alt="" /> : <Disc3 size={28} className="faint" />}</div>
-        <div className="np-meta">
+        <div className="np-art" onContextMenu={(e) => cur && openMenu(e, nowMenu())}>{cur && coverOf(cur) ? <img src={coverOf(cur)} alt="" /> : <Disc3 size={28} className="faint" />}</div>
+        <div className="np-meta" onContextMenu={(e) => cur && openMenu(e, nowMenu())}>
           <b>{cur ? (cur.kind === "track" ? cur.title : cur.name) : "Nothing playing"}</b>
           <span className="muted small">{cur ? (cur.kind === "track" ? [cur.artist, cur.album].filter(Boolean).join(" · ") : `Radio${cur.country ? ` · ${cur.country}` : ""}`) : "Pick a song, an album or a station"}</span>
         </div>
@@ -358,7 +404,17 @@ export function MusicApp() {
           <button className={`icon-btn${prefs.shuffle ? " on" : ""}`} aria-pressed={prefs.shuffle} aria-label="Shuffle" data-tip-up="" data-tip="Shuffle" onClick={() => setPrefs({ shuffle: !prefs.shuffle })}>
             <Shuffle size={15} />
           </button>
-          <button className="icon-btn" aria-label="Previous" onClick={previous}>
+          <button
+            className="icon-btn"
+            aria-label="Back to the previous album or artist"
+            data-tip-up=""
+            data-tip="Previous album or artist"
+            disabled={cur?.kind !== "track"}
+            onClick={(e) => openMenuAt(e.currentTarget, backMenu())}
+          >
+            <ChevronsLeft size={16} />
+          </button>
+          <button className="icon-btn" aria-label="Previous" onClick={previous} onContextMenu={(e) => (e.preventDefault(), openMenuAt(e.currentTarget, backMenu()))}>
             <SkipBack size={16} />
           </button>
           <button className="icon-btn np-play" aria-label={m.playing ? "Pause" : "Play"} onClick={toggle}>
@@ -386,6 +442,16 @@ export function MusicApp() {
           >
             {prefs.repeat === "one" ? <Repeat1 size={15} /> : <Repeat size={15} />}
           </button>
+          <button
+            className={`icon-btn${prefs.gapless ? " on" : ""}`}
+            aria-label="Gapless"
+            aria-pressed={Boolean(prefs.gapless)}
+            data-tip-up=""
+            data-tip={prefs.gapless ? "Gapless: songs run straight into each other" : "Gapless is off: a moment between songs"}
+            onClick={() => setPrefs({ gapless: !prefs.gapless })}
+          >
+            <Link2 size={15} />
+          </button>
         </div>
         <div className="np-seek">
           <span className="faint small">{time(m.position)}</span>
@@ -406,6 +472,16 @@ export function MusicApp() {
             onClick={vizMenu}
           >
             <Maximize2 size={15} />
+          </button>
+          <button
+            className={`icon-btn${prefs.showQueue ? " on" : ""}`}
+            aria-label="The queue"
+            aria-pressed={Boolean(prefs.showQueue)}
+            data-tip-up=""
+            data-tip="The queue: what played, what's playing, what's next"
+            onClick={() => setPrefs({ showQueue: !prefs.showQueue })}
+          >
+            <ListMusic size={15} />
           </button>
         </div>
       </footer>
@@ -479,6 +555,7 @@ function Stations({ list, saved }: { list: Station[]; saved?: boolean }) {
           onContextMenu={(e) =>
             openMenu(e, [
               { label: "Play", run: () => playList(items, i) },
+              ...queueMenu([items[i]]),
               saved ? { label: "Forget this station", danger: true, run: () => forgetStation(st.url) } : { label: "Save", run: () => saveStation(st) },
               ...(st.homepage ? [{ label: "Open its website", run: () => window.open(st.homepage, "_blank", "noopener") }] : []),
             ])
@@ -651,7 +728,9 @@ function FolderPicker({ onPick, onClose }: { onPick: (path: string) => void; onC
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setBusy(false));
   };
-  useEffect(() => go(""), []);
+  useEffect(() => {
+    void go("");
+  }, []);
   return (
     <div className="scrim" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="dialog folder-picker" role="dialog" aria-modal="true" aria-label="Choose a music folder">
@@ -1022,5 +1101,69 @@ function PlaylistView({ id, trackMenu, onGone }: { id: string; trackMenu: (list:
         </p>
       )}
     </div>
+  );
+}
+
+/** The queue beside the player: the songs that played, the one playing, and what's next. A shuffled library is
+ *  thousands of songs, so only the ones around the song playing are drawn, with more on asking. */
+function QueueView({ onClose, infoOf }: { onClose: () => void; infoOf: (t: Track) => void }) {
+  const queue = useMusic((s) => s.queue);
+  const index = useMusic((s) => s.index);
+  const [before, setBefore] = useState(20);
+  const [after, setAfter] = useState(50);
+  const nowRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    nowRef.current?.scrollIntoView({ block: "nearest" });
+  }, [index]);
+  const from = Math.max(0, index - before);
+  const to = Math.min(queue.length, index + 1 + after);
+  const rows = queue.slice(from, to);
+  const menu = (it: Item, i: number): MenuItem[] => [
+    { label: i === index ? "Playing" : "Play this", disabled: i === index, run: () => playAt(i) },
+    ...(it.kind === "track" ? [{ label: "Properties…", run: () => infoOf(it) } as MenuItem] : []),
+    { label: "Take it out of the queue", disabled: i === index, run: () => removeAt(i) },
+  ];
+  return (
+    <section className="music-queue" aria-label="The queue">
+      <div className="music-queue-head">
+        <b>The queue</b>
+        <span className="faint small">{index >= 0 ? `${index + 1} of ${queue.length}` : `${queue.length} songs`}</span>
+        <span className="grow" />
+        <button className="icon-btn" aria-label="Hide the queue" onClick={onClose}>
+          <X size={14} />
+        </button>
+      </div>
+      <div className="music-queue-list">
+        {from > 0 ? (
+          <button className="btn small ghost" onClick={() => setBefore((n) => n + 100)}>
+            {from} earlier…
+          </button>
+        ) : null}
+        {rows.map((it, k) => {
+          const i = from + k;
+          const on = i === index;
+          return (
+            <button
+              key={i}
+              ref={on ? nowRef : undefined}
+              className={`music-queue-row${on ? " on" : ""}${i < index ? " past" : ""}`}
+              onDoubleClick={() => playAt(i)}
+              onContextMenu={(e) => openMenu(e, menu(it, i))}
+              title={on ? "Playing" : "Double-click to play; right-click for more"}
+            >
+              <span className="faint small">{i + 1}</span>
+              <span className="grow">{it.kind === "track" ? it.title : it.name}</span>
+              <span className="faint small">{it.kind === "track" ? it.artist : "Radio"}</span>
+            </button>
+          );
+        })}
+        {to < queue.length ? (
+          <button className="btn small ghost" onClick={() => setAfter((n) => n + 100)}>
+            {queue.length - to} more…
+          </button>
+        ) : null}
+        {!queue.length ? <p className="faint small">Nothing queued yet.</p> : null}
+      </div>
+    </section>
   );
 }

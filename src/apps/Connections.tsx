@@ -693,6 +693,18 @@ function WebPanel() {
         <span>SearXNG address (JSON output is used when it's on in SearXNG's settings.yml; otherwise its results page is read)</span>
         <input className="input mono" value={w.searx} placeholder="http://localhost:8888" onChange={(e) => set({ searx: e.target.value })} />
       </label>
+      <label className="field" style={{ marginTop: 12 }}>
+        <span>
+          Local addresses the characters' own requests may reach. Their requests (http_request, reading a page) don't go to this computer, the home network or a
+          tailnet unless the address is listed here, and never to SEASIDE's own address.
+        </span>
+        <input
+          className="input mono"
+          value={s.net.localHosts ?? ""}
+          placeholder="192.168.1.20, homeassistant.local, nas:8080"
+          onChange={(e) => desk().set({ net: { ...desk().net, localHosts: e.target.value } })}
+        />
+      </label>
       <h4>Try it</h4>
       <div className="row">
         <input className="input grow" value={q} onChange={(e) => setQ(e.target.value)} />

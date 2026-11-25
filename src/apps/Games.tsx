@@ -9,9 +9,14 @@ import {
   List,
   Maximize,
   MessageCircle,
+  MessagesSquare,
+  Send,
   Minimize,
   Play,
   RefreshCw,
+  Sparkles,
+  Wand2,
+  Armchair,
   Rows3,
   Search,
   Square,
@@ -21,9 +26,15 @@ import {
 } from "lucide-react";
 import { desk, useDesk, type AppPrefs, type LibSection, type LibSort, type LibView } from "../lib/store.ts";
 import { gameScreen } from "../lib/bus.ts";
-import { gameTurn } from "../lib/agent.ts";
-import { appOrigin, bridge, groupApps, library, readScreen, type Pkg, type UpdateRow } from "../lib/xdc.ts";
-import { slug } from "../lib/characters.ts";
+import { gameTurn, sayToPlayers } from "../lib/agent.ts";
+import { changePlans, loadPlans, type Plan } from "../lib/plans.ts";
+import { LinkedGames, LinkThisGame } from "./GameLinks.tsx";
+import "../lib/websimBridge.ts"; // websim games get the desktop's picture engine (server/inject.mjs)
+import "../lib/decide.ts"; // characters' seats get quick decisions from their own models (server/inject.mjs)
+import { myAddrName, myName, ownName, useMyName } from "../lib/myName.ts";
+import { aiAddr, linkTag, appOrigin, bridge, bringInStep, groupApps, lanternOf, library, actOnScreen, readScreen, webImportSaid, type Lantern, type Pkg, type UpdateRow } from "../lib/xdc.ts";
+import { allowed } from "../lib/privacy.ts";
+import { imagineGame } from "../lib/gameMaker.ts";
 import { CharAvatar, Confirm } from "../ui/common.tsx";
 import { openMenu, type MenuItem } from "../ui/ContextMenu.tsx";
 
@@ -153,6 +164,13 @@ function Library() {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState<string | null>(null);
   const [busy, setBusy] = useState("");
+  // "Imagine a game", or "Change this game" from a card's menu (which asks for it with an event)
+  const [imagine, setImagine] = useState<ImagineFor | null>(null);
+  useEffect(() => {
+    const on = (e: Event) => setImagine((e as CustomEvent<ImagineFor>).detail);
+    window.addEventListener("pdd-imagine", on);
+    return () => window.removeEventListener("pdd-imagine", on);
+  }, []);
   const fileRef = useRef<HTMLInputElement>(null);
   const dirRef = useRef<HTMLInputElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
@@ -249,6 +267,7 @@ function Library() {
       }}
     >
       <nav className="lib-nav" aria-label="Sections">
+        <LinkedGames />
         {(
           [
             ["all", "Everything"],
@@ -279,6 +298,9 @@ function Library() {
         </button>
         <button className="btn small" onClick={() => dirRef.current?.click()}>
           <FolderInput size={14} /> Import a folder
+        </button>
+        <button className="btn small primary" disabled={s.toddler} onClick={() => setImagine({})} title="Describe a game and the character you're with makes it">
+          <Sparkles size={14} /> Imagine a game
         </button>
         <button className="btn small" onClick={() => desk().openApp("studio")}>
           <Code2 size={14} /> XDC Studio
@@ -364,6 +386,100 @@ function Library() {
         webkitdirectory=""
         onChange={(e) => e.target.files && void doImport(e.target.files)}
       />
+      {imagine ? <ImagineDialog what={imagine} onClose={() => setImagine(null)} /> : null}
+    </div>
+  );
+}
+
+/** What "Imagine a game" works on: nothing (a new game), a Mini App's version, or a built-in game (copied first). */
+type ImagineFor = { base?: Pkg; versions?: string[]; game?: { title: string; path: string } };
+
+/** Play a version of a Mini App, with its other versions beside it. */
+function playPkg(p: Pkg, all: Pkg[]) {
+  const list = all.filter((x) => x.appKey === p.appKey);
+  launch({ key: `xdc:${p.appKey}`, kind: "xdc", title: p.name, blurb: p.description, icon: "", size: 0, added: p.added, versions: (list.length ? list : [p]).map((x) => ({ id: x.id, label: x.version, pkg: x })) }, { id: p.id, label: p.version, pkg: p });
+}
+
+function ImagineDialog({ what, onClose }: { what: ImagineFor; onClose: () => void }) {
+  const s = useDesk();
+  const room = s.roomCharacters();
+  const [who, setWho] = useState(room.find((c) => c.id === s.focus)?.id ?? room[0]?.id ?? "");
+  const [ask, setAsk] = useState("");
+  const canPictures = s.media.images.some((e) => e.enabled);
+  const canMusic = s.media.songs.some((e) => e.enabled);
+  const [pictures, setPictures] = useState(canPictures);
+  const [music, setMusic] = useState(false);
+  const [busy, setBusy] = useState("");
+  const stop = useRef<AbortController | null>(null);
+  const changing = Boolean(what.base || what.game);
+  const title = what.base?.name ?? what.game?.title ?? "";
+
+  const go = async () => {
+    if (!ask.trim() || !who) return;
+    stop.current = new AbortController();
+    try {
+      let base = what.base;
+      let versions = what.versions;
+      if (!base && what.game) {
+        setBusy(`Copying ${what.game.title} so it can be changed…`);
+        base = (await library.importWeb({ game: what.game.path }, allowed(s.privacy, "web"))).pkg;
+        versions = [];
+      }
+      const r = await imagineGame({ charId: who, ask, base, versions, pictures, music, progress: setBusy, signal: stop.current.signal });
+      libraryChanged();
+      const all = await library.list();
+      const said = [`${r.title} ${changing ? `version ${r.pkg.version}` : ""} is ready.`.replace(/\s+/g, " "), r.note, r.made.length ? `Made for it: ${r.made.join(", ")}.` : "", r.skipped.length ? `Not made (no engine for them): ${r.skipped.join(", ")}.` : ""];
+      desk().say(said.filter(Boolean).join(" "));
+      onClose();
+      playPkg(r.pkg, all);
+    } catch (e) {
+      if (!(e instanceof DOMException && e.name === "AbortError")) desk().say(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <div className="scrim" onPointerDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
+      <div className="dialog" role="dialog" aria-modal="true" aria-label={changing ? `Change ${title}` : "Imagine a game"}>
+        <h2>{changing ? `Change ${title}` : "Imagine a game"}</h2>
+        <textarea
+          className="input"
+          rows={4}
+          autoFocus
+          value={ask}
+          onChange={(e) => setAsk(e.target.value)}
+          placeholder={changing ? "Make the cats faster, and add a score that counts up" : "A game where a cat hops across lily pads to catch fireflies, getting faster each level"}
+        />
+        <div className="col" style={{ gap: 6, marginTop: 8 }}>
+          <label className="row small" style={{ gap: 6 }}>
+            <span className="faint">Made by</span>
+            <select className="input" value={who} onChange={(e) => setWho(e.target.value)} aria-label="Who makes it">
+              {room.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="row small" style={{ gap: 6 }} title={canPictures ? "" : "Set up a picture engine in Create first"}>
+            <input type="checkbox" disabled={!canPictures} checked={pictures && canPictures} onChange={(e) => setPictures(e.target.checked)} /> Pictures for it{canPictures ? "" : " (no picture engine yet)"}
+          </label>
+          <label className="row small" style={{ gap: 6 }} title={canMusic ? "" : "Set up a song engine in the Song Maker first"}>
+            <input type="checkbox" disabled={!canMusic} checked={music && canMusic} onChange={(e) => setMusic(e.target.checked)} /> Music for it{canMusic ? " (takes a few minutes)" : " (no song engine yet)"}
+          </label>
+          <p className="small faint">Sound effects are made for it either way. {changing ? "The change is a new version; the one before stays playable." : "It's a Mini App: change it again from its menu, edit it in XDC Studio, or share it."}</p>
+        </div>
+        {busy ? <p className="small">{busy}</p> : null}
+        <div className="actions">
+          <button className="btn" onClick={() => (busy ? stop.current?.abort() : onClose())}>
+            {busy ? "Stop" : "Cancel"}
+          </button>
+          <button className="btn primary" disabled={Boolean(busy) || !ask.trim() || !who} onClick={() => void go()}>
+            <Wand2 size={14} /> {changing ? "Change it" : "Make it"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -509,6 +625,23 @@ function cardMenu(it: Item, onOpen: (key: string) => void, onPlay: (it: Item, v?
     { sep: true },
     { label: "Details and versions", run: () => onOpen(it.key) },
     { label: p.fav ? "Remove from favourites" : "Add to favourites", checked: p.fav, run: () => s.setAppPrefs(it.key, { fav: !p.fav }) },
+    // a built-in game made into a Mini App of its own, to change in XDC Studio (the game here stays as it is)
+    ...(it.kind === "game" && chosen.path
+      ? [{ label: "Make a copy to edit in XDC Studio", run: () => void editGame(it.title, chosen.path!) } as MenuItem]
+      : []),
+    ...(!s.toddler && ((it.kind === "game" && chosen.path) || pkg)
+      ? [
+          {
+            label: "Change this game…",
+            run: () =>
+              window.dispatchEvent(
+                new CustomEvent<ImagineFor>("pdd-imagine", {
+                  detail: pkg ? { base: pkg, versions: it.versions.map((v) => v.label) } : { game: { title: it.title, path: chosen.path! } },
+                }),
+              ),
+          } as MenuItem,
+        ]
+      : []),
     ...(pkg
       ? ([
           { label: "Open in XDC Studio", run: () => (s.set({ studioPkg: pkg.id }), s.openApp("studio")) },
@@ -525,6 +658,22 @@ function cardMenu(it: Item, onOpen: (key: string) => void, onPlay: (it: Item, v?
         ] as MenuItem[])
       : []),
   ];
+}
+
+/** A built-in game as a Mini App draft in XDC Studio. */
+async function editGame(title: string, gamePath: string) {
+  const s = desk();
+  const web = allowed(s.privacy, "web");
+  s.say(`Making ${title} into a Mini App to edit…`);
+  try {
+    const r = await library.importWeb({ game: gamePath }, web);
+    libraryChanged();
+    s.set({ studioPkg: r.pkg.id });
+    s.openApp("studio");
+    s.say(webImportSaid(r, web));
+  } catch (e) {
+    s.say(e instanceof Error ? e.message : String(e));
+  }
 }
 
 function Details({ item, onClose, onPlay }: { item: Item; onClose: () => void; onPlay: (it: Item, v?: Version) => void }) {
@@ -720,6 +869,9 @@ export function GameBack() {
 /** Controls that sit in the Games window's own title bar while something is open. */
 export function GameBar() {
   const [full, setFull] = useState(false);
+  const [chat, setChat] = useGameChat();
+  const g = useDesk((s) => s.game);
+  const seatsOn = useDesk((s) => (g?.kind === "xdc" ? seatsWanted(s.appPrefs, g.slug) : false));
   useEffect(() => {
     const on = () => setFull(Boolean(document.fullscreenElement));
     document.addEventListener("fullscreenchange", on);
@@ -728,11 +880,25 @@ export function GameBar() {
   return (
     <>
       <span className="grow" />
+      {g?.kind === "xdc" ? (
+        <button
+          className={`icon-btn${seatsOn ? " on" : ""}`}
+          onClick={() => desk().setAppPrefs(`xdc:${g.slug}`, { seats: !seatsOn })}
+          aria-pressed={seatsOn}
+          data-tip={seatsOn ? "The characters each have their own seat (a hidden copy running as them): tap to stop" : "Give each playing character her own seat: a hidden copy of the app running as her"}
+          aria-label="The characters' seats"
+        >
+          <Armchair size={15} />
+        </button>
+      ) : null}
       <button className="icon-btn" onClick={() => window.dispatchEvent(new Event("pdd-game-reload"))} data-tip="Reload" aria-label="Reload">
         <RefreshCw size={14} />
       </button>
       <button className="icon-btn" onClick={() => void gameTurn()} data-tip="Ask the players what they'd do" aria-label="Ask the players">
         <MessageCircle size={15} />
+      </button>
+      <button className={`icon-btn${chat ? " on" : ""}`} onClick={() => setChat(!chat)} aria-pressed={chat} data-tip={chat ? "Hide the room's chat" : "The room's chat, beside the game"} aria-label="The room's chat">
+        <MessagesSquare size={15} />
       </button>
       <button className="icon-btn" onClick={() => void toggleFull()} data-tip={full ? "Leave full screen" : "Full screen"} aria-label="Full screen">
         {full ? <Minimize size={15} /> : <Maximize size={15} />}
@@ -741,15 +907,141 @@ export function GameBar() {
   );
 }
 
+/** Whether the room's chat shows beside the game (kept on this device; the title bar and the game share it). */
+const CHAT_KEY = "pdd-game-chat";
+function useGameChat(): [boolean, (on: boolean) => void] {
+  const read = () => {
+    try {
+      return localStorage.getItem(CHAT_KEY) === "1";
+    } catch {
+      return false;
+    }
+  };
+  const [on, setOn] = useState(read);
+  useEffect(() => {
+    const sync = () => setOn(read());
+    window.addEventListener("pdd-game-chat", sync);
+    return () => window.removeEventListener("pdd-game-chat", sync);
+  }, []);
+  const set = (v: boolean) => {
+    try {
+      localStorage.setItem(CHAT_KEY, v ? "1" : "0");
+    } catch {
+      /* it just won't be remembered */
+    }
+    window.dispatchEvent(new Event("pdd-game-chat"));
+  };
+  return [on, set];
+}
+
+/** The room's conversation beside the game: what the players say about their moves, and a box to talk to them. */
+/** Dee's soft commitments: plans left on the table in this game, that anyone playing can see, keep or cancel. */
+function GamePlans() {
+  const g = useDesk((s) => s.game);
+  const session = useDesk((s) => s.session);
+  const scope = g ? (g.scope ?? g.slug) : "";
+  const [plans, setPlans] = useState<Plan[]>([]);
+  const [draft, setDraft] = useState("");
+  const [open, setOpen] = useState(true);
+  useEffect(() => {
+    if (!scope) return;
+    let live = true;
+    const load = () => void loadPlans(scope).then((p) => live && setPlans(p));
+    load();
+    const t = window.setInterval(load, 4000); // (another device may add one)
+    window.addEventListener("pdd-plans", load);
+    return () => {
+      live = false;
+      window.clearInterval(t);
+      window.removeEventListener("pdd-plans", load);
+    };
+  }, [scope]);
+  if (!scope) return null;
+  const named = useMyName();
+  const me = session && !ownName() ? session : named;
+  const openPlans = plans.filter((p) => p.status === "open");
+  const add = () => {
+    const text = draft.trim();
+    if (!text) return;
+    setDraft("");
+    void changePlans(scope, { do: "add", by: me, text });
+  };
+  return (
+    <div className="game-plans">
+      <button className="game-plans-head small" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        Plans on the table{openPlans.length ? ` (${openPlans.length})` : ""}
+      </button>
+      {open ? (
+        <>
+          {openPlans.map((p) => (
+            <div key={p.id} className="game-plan small">
+              <b>{p.by}</b> {p.text}
+              {p.revisedBy ? <span className="faint"> (revised by {p.revisedBy})</span> : null}
+              <span className="game-plan-acts">
+                <button className="btn tiny" onClick={() => void changePlans(scope, { do: "done", id: p.id, by: me })} title="Kept">✓</button>
+                <button className="btn tiny" onClick={() => void changePlans(scope, { do: "cancel", id: p.id, by: me })} title="Cancel this plan">✕</button>
+              </span>
+            </div>
+          ))}
+          <div className="game-chat-say">
+            <input className="input" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), add())} placeholder="Leave a plan: on my turn, if…" aria-label="Leave a plan" />
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function GameChat() {
+  const messages = useDesk((s) => s.messages);
+  const character = useDesk((s) => s.character);
+  const [draft, setDraft] = useState("");
+  const list = useRef<HTMLDivElement>(null);
+  const shown = messages.filter((m) => (m.kind === "human" || m.kind === "character") && String(m.text ?? "").trim()).slice(-40);
+  useEffect(() => {
+    list.current?.scrollTo({ top: list.current.scrollHeight });
+  }, [shown.length, shown.at(-1)?.text]);
+  const send = () => {
+    const text = draft.trim();
+    if (!text) return;
+    setDraft("");
+    void sayToPlayers(text);
+  };
+  return (
+    <aside className="game-chat" aria-label="The room's chat">
+      <GamePlans />
+      <div className="game-chat-list" ref={list}>
+        {shown.length ? (
+          shown.map((m) => (
+            <div key={m.id} className={`game-chat-line${m.kind === "human" ? " me" : ""}`}>
+              <b>{m.kind === "character" ? (character(m.who)?.short ?? m.name ?? m.who) : (m.name ?? "You")}</b> {String(m.text).replace(/\n{3,}/g, "\n\n")}
+            </div>
+          ))
+        ) : (
+          <p className="small faint">Nothing said yet. Talk to the players here, or press Ask the players.</p>
+        )}
+      </div>
+      <div className="game-chat-say">
+        <input className="input" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), send())} placeholder="Say something to the players" aria-label="Say something to the players" />
+        <button className="icon-btn" onClick={send} disabled={!draft.trim()} aria-label="Send">
+          <Send size={15} />
+        </button>
+      </div>
+    </aside>
+  );
+}
+
 function Playing() {
   const g = useDesk((s) => s.game)!;
+  const [chat] = useGameChat();
   const session = useDesk((s) => s.session);
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [full, setFull] = useState(false);
   const [nonce, setNonce] = useState(0);
   const [pkg, setPkg] = useState<Pkg | null>(null);
-  const me = session ?? "You";
-  const addr = `you:${slug(me) || "you"}`;
+  const named = useMyName();
+  const me = session && !ownName() ? session : named;
+  const addr = `you:${myAddrName()}${linkTag(g.scope)}`;
 
   useEffect(() => {
     if (g.kind !== "xdc" || !g.pkgId) return;
@@ -809,19 +1101,135 @@ function Playing() {
           <X size={14} /> Leave full screen
         </button>
       ) : null}
-      {src ? (
-        <iframe
-          ref={frameRef}
-          key={`${src}#${nonce}`}
-          className="game-frame"
-          src={src}
-          title={g.title}
-          allow="fullscreen; autoplay; clipboard-write; gamepad"
-        />
-      ) : (
-        <div className="empty">{g.kind === "xdc" ? "Opening…" : "This game couldn't be found."}</div>
-      )}
+      <div className="game-body">
+        {src ? (
+          <iframe
+            ref={frameRef}
+            key={`${src}#${nonce}`}
+            className="game-frame"
+            src={src}
+            title={g.title}
+            allow="fullscreen; autoplay; clipboard-write; gamepad"
+          />
+        ) : (
+          <div className="empty">{g.kind === "xdc" ? "Opening…" : "This game couldn't be found."}</div>
+        )}
+        {chat ? <GameChat /> : null}
+        {g.kind === "xdc" && g.scope ? <GameLantern scope={g.scope} pkgId={g.pkgId} /> : null}
+      </div>
+      {g.kind === "xdc" && pkg && g.scope ? <Seats pkg={pkg} scope={g.scope} slug={g.slug} players={g.players} nonce={nonce} /> : null}
     </div>
   );
+}
+
+const ago = (ms: number) => (ms < 5000 ? "just now" : ms < 90_000 ? `${Math.round(ms / 1000)} s ago` : `${Math.round(ms / 60_000)} min ago`);
+
+/** Dee's lantern: a quiet sign of whether every copy of this game (yours, each character's seat) sees the same thing,
+ *  and which one is behind if not, with a way to bring it back in step. Divergence is normal and fixable. */
+function GameLantern({ scope, pkgId }: { scope: string; pkgId?: string }) {
+  const [l, setL] = useState<Lantern>(() => lanternOf(scope));
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const t = window.setInterval(() => setL(lanternOf(scope)), 1000);
+    return () => window.clearInterval(t);
+  }, [scope]);
+  if (!l.copies.length) return null;
+  const now = Date.now();
+  const said = l.inStep ? `In step at #${l.newest}` : "A copy is behind";
+  return (
+    <div className={`game-lantern${l.inStep ? "" : " drift"}${open ? " open" : ""}`}>
+      <button className="game-lantern-bead" onClick={() => setOpen((o) => !o)} title={said} aria-label={`Lantern: ${said}`} aria-expanded={open}>
+        <span aria-hidden="true">🏮</span>
+        {open || !l.inStep ? <span className="small">{said}</span> : null}
+      </button>
+      {open ? (
+        <div className="game-lantern-card small">
+          <div className="muted">Each player runs their own copy of this game. Here's how far each has got:</div>
+          <ul>
+            {l.copies.map((c) => (
+              <li key={c.addr}>
+                {c.addr.startsWith("ai:") ? `${c.name}'s seat` : c.addr.startsWith("you:") && !c.addr.includes("@") ? "Your copy" : `${c.name}'s copy`}: {c.at >= l.newest ? <span className="ok">#{c.at}, in step</span> : <span className="warn">#{c.at}, {c.behindFor >= 4000 ? "behind" : "catching up"}</span>}
+              </li>
+            ))}
+          </ul>
+          {l.lastMove ? <div>Last update: #{l.lastMove.serial} from {l.lastMove.name}, {ago(now - l.lastMove.at)}.</div> : <div>No updates yet.</div>}
+          <div className="muted">Other devices on this SEASIDE: checked {l.pulledAt ? ago(now - l.pulledAt) : "soon"}.</div>
+          {!l.inStep ? (
+            <button className="btn small" onClick={() => void bringInStep(scope)}>
+              Bring everyone in step
+            </button>
+          ) : null}
+          <LinkThisGame scope={scope} pkgId={pkgId} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Seats are on unless turned off for this app. */
+const seatsWanted = (prefs: Record<string, AppPrefs>, slug: string) => prefs[`xdc:${slug}`]?.seats ?? true;
+
+/** Each playing character's own seat: a hidden copy of the app running as her (selfAddr "ai:<id>"), the way her own
+ *  device would. The app does for her what it does for any player (deals her tiles, keeps her board, answers its own
+ *  handshakes), and game_screen reads her copy instead of the person's. Silent, and out of sight. */
+function Seats({ pkg, scope, slug, players, nonce }: { pkg: Pkg; scope: string; slug: string; players: string[]; nonce: number }) {
+  const on = useDesk((s) => seatsWanted(s.appPrefs, slug));
+  // names as one string, so the selector gives the same value until something really changes
+  const names = useDesk((s) => players.map((id) => (s.roomCharacters().some((c) => c.id === id) ? (s.character(id)?.short ?? "") : "")).join("\n")).split("\n");
+  // watching a seat: the same running copy brought into view, watch-only, as looking over her shoulder. Her screen is
+  // hers (a secret word, a hand of cards), so she's told in the room when someone starts and stops watching.
+  const [watch, setWatch] = useState<string | null>(null);
+  const seated = players.map((id, i) => ({ id, name: names[i] })).filter((x) => x.name);
+  const watchSeat = (id: string | null) => {
+    const who = myName() || "The person";
+    const was = seated.find((x) => x.id === watch);
+    const now = seated.find((x) => x.id === id);
+    if (was) desk().post({ kind: "notice", who: "desk", name: "Desk", source: "desk", text: `${who} stopped watching ${was.name}'s screen.` });
+    if (now) desk().post({ kind: "notice", who: "desk", name: "Desk", source: "desk", text: `${who} is watching ${now.name}'s screen, as if over her shoulder (to see how it goes and learn along).` });
+    setWatch(id);
+  };
+  if (!on) return null;
+  return (
+    <>
+      {seated.length ? (
+        <div className={`seat-watch${watch ? " on" : ""}`}>
+          <span>👁 Watch</span>
+          {seated.map((x) => (
+            <button key={x.id} type="button" className={`chip${watch === x.id ? " on" : ""}`} onClick={() => watchSeat(watch === x.id ? null : x.id)} title={watch === x.id ? `Stop watching ${x.name}'s screen` : `Watch ${x.name}'s screen`}>
+              {x.name}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <div className={`game-seats${watch ? " watching" : ""}`} aria-hidden="true">
+        {players.map((id, i) => (names[i] ? <Seat key={`${id}#${nonce}`} pkg={pkg} scope={scope} id={id} name={names[i]} watched={watch === id} /> : null))}
+      </div>
+    </>
+  );
+}
+
+function Seat({ pkg, scope, id, name, watched = false }: { pkg: Pkg; scope: string; id: string; name: string; watched?: boolean }) {
+  const ref = useRef<HTMLIFrameElement>(null);
+  // attach before the app's scripts run, as the person's frame does: they ask for their state at once
+  useEffect(() => {
+    const win = ref.current?.contentWindow;
+    if (!win) return;
+    return bridge.attach(win, scope, aiAddr(id, scope), name);
+  });
+  useEffect(() => {
+    gameScreen.registerSeat(id, () => readScreen(ref.current?.contentWindow));
+    gameScreen.registerActor(id, (act) => actOnScreen(ref.current?.contentWindow, act));
+    // a seat makes no sound: the person hears their own copy
+    const hush = (e: MessageEvent) => {
+      if (e.source === ref.current?.contentWindow && (e.data as { __pdd?: string })?.__pdd === "volume-ready") ref.current?.contentWindow?.postMessage({ __pdd: "volume", volume: 0 }, "*");
+    };
+    window.addEventListener("message", hush);
+    return () => {
+      gameScreen.registerSeat(id, null);
+      gameScreen.registerActor(id, null);
+      window.removeEventListener("message", hush);
+    };
+  }, [id]);
+  return <iframe ref={ref} className={`game-seat${watched ? " watched" : ""}`} data-seat={id} src={library.runUrl(pkg, scope, aiAddr(id, scope), name)} title={`${name}'s seat`} tabIndex={-1} allow="autoplay; gamepad" />;
 }
 

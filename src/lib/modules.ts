@@ -29,7 +29,7 @@ export async function lookForModules(orgs: string[]): Promise<Found[]> {
 export async function installModule(f: Found, charId: string): Promise<string> {
   const s = desk();
   if (!allowed(s.privacy, "web")) throw new Error(blockedBecause(s.privacy, "web"));
-  const r = await post<{ kind: string; name: string; version: string; files?: Record<string, string>; app?: unknown; backup?: unknown; mcp?: { name: string; command: string; args: string[]; source: string } }>(
+  const r = await post<{ kind: string; name: string; version: string; files?: Record<string, string>; app?: unknown; backup?: unknown; mcp?: { name: string; command: string; args: string[]; env?: Record<string, string>; source: string } }>(
     "/api/modules/install",
     { org: f.org, repo: f.repo, commit: f.commit },
   );
@@ -49,7 +49,8 @@ export async function installModule(f: Found, charId: string): Promise<string> {
     desk().set({
       mcp: [
         ...desk().mcp,
-        { id: uid(), name: m.name, url: "", keyName: "", enabled: false, stdio: { command: m.command, args: m.args }, description: `A module from ${m.source}. Get its code there (it's never run from GitHub), set where it lives, then switch it on.` },
+        // hers (the character it was installed for): her own keys fill the ${NAME}s it asks for, before the household's
+        { id: uid(), name: m.name, url: "", keyName: "", enabled: false, owner: charId || undefined, stdio: { command: m.command, args: m.args, env: m.env ?? {} }, description: `A module from ${m.source}. Get its code there (it's never run from GitHub), set where it lives, then switch it on.${Object.keys(m.env ?? {}).length ? ` It asks for these keys: ${Object.keys(m.env ?? {}).join(", ")}.` : ""}` },
       ],
     });
     return `${m.name} is in Connections → Tool servers, switched off: its code is at ${m.source}.`;

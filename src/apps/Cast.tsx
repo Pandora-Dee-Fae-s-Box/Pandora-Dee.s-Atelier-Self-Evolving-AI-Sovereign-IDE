@@ -651,6 +651,56 @@ function CharWays({ c }: { c: Character }) {
         </div>
         <span className="small faint">A smaller, cheaper model can do the background work; {c.short}'s own AI is still tried if it can't be reached.</span>
       </Own>
+      <Own label="Quick decisions model (game steps, quick checks)" own={Boolean(p.decider?.connection)} shared={`helper, then ${c.short}'s own AI`} onReset={() => unset("decider")}>
+        <div className="row" style={{ gap: 6 }}>
+          <select className="select" value={p.decider?.connection ?? ""} onChange={(e) => (e.target.value ? set({ decider: { connection: e.target.value } }) : unset("decider"))}>
+            <option value="">helper, then {c.short}'s own AI</option>
+            {conns.map((x) => (
+              <option key={x.id} value={x.id}>
+                {x.label}
+              </option>
+            ))}
+          </select>
+          {p.decider?.connection ? (
+            <input
+              className="input mono grow"
+              value={p.decider.model ?? ""}
+              placeholder={conns.find((x) => x.id === p.decider?.connection)?.model || "that connection's model"}
+              onChange={(e) => set({ decider: { ...p.decider, model: e.target.value.trim() || undefined } })}
+              aria-label="Quick decisions model"
+            />
+          ) : null}
+        </div>
+        <span className="small faint">
+          Yes-or-no and pick-one questions answered in a fraction of a second, like whether a game step is done. A local model gives real
+          probabilities (a cloud model only its answer); it only reads and picks, never writes, so a small one does well.
+        </span>
+      </Own>
+      <Own label="Playing model (games and apps)" own={Boolean(p.player?.connection)} shared={`${c.short}'s own AI`} onReset={() => unset("player")}>
+        <div className="row" style={{ gap: 6 }}>
+          <select className="select" value={p.player?.connection ?? ""} onChange={(e) => (e.target.value ? set({ player: { connection: e.target.value } }) : unset("player"))}>
+            <option value="">{c.short}'s own AI</option>
+            {conns.map((x) => (
+              <option key={x.id} value={x.id}>
+                {x.label}
+              </option>
+            ))}
+          </select>
+          {p.player?.connection ? (
+            <input
+              className="input mono grow"
+              value={p.player.model ?? ""}
+              placeholder={conns.find((x) => x.id === p.player?.connection)?.model || "that connection's model"}
+              onChange={(e) => set({ player: { ...p.player, model: e.target.value.trim() || undefined } })}
+              aria-label="Playing model"
+            />
+          ) : null}
+        </div>
+        <span className="small faint">
+          While {c.short} has a seat in a game or app, this model plays: one that takes actions well. Her own AI stays for talk and roleplay, and
+          is still tried if this one can't be reached.
+        </span>
+      </Own>
       <div className="field">
         <span>Heartbeat</span>
         <label className="check" style={{ padding: 0 }}>
@@ -844,6 +894,22 @@ function CharKeys({ c }: { c: Character }) {
           <button className="btn small" disabled={!name || !value} onClick={() => void save(name, value)}>
             Save
           </button>
+          {/* a key that's a file (a GitHub App's .pem, a wallet file): taken in whole, line breaks and all, never shown */}
+          <label className={`btn small${name ? "" : " disabled"}`} title={name ? `Put a file's contents in ${c.short}'s vault as ${name}` : "Name the key first"}>
+            From a file…
+            <input
+              type="file"
+              hidden
+              disabled={!name}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = "";
+                if (!f || !name) return;
+                if (f.size > 8000) return setNote(`${f.name} is too big to be one key.`);
+                void f.text().then((t) => (t.trim() ? save(name, t.replace(/\r\n/g, "\n").trim()) : setNote(`${f.name} is empty.`)));
+              }}
+            />
+          </label>
         </div>
       ) : (
         <p className="note small">{c.short}'s keys are set on the desktop's own computer, or over Tailscale's https.</p>

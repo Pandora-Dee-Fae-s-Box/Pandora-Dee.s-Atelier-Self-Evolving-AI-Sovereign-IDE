@@ -50,7 +50,7 @@ export const APPS: { id: AppId; title: string; hint: string }[] = [
   { id: "cast", title: "Characters", hint: "Who's here, who's available, and their profiles" },
   { id: "notes", title: "Notes", hint: "Your notes: links, tags, tasks, graph" },
   { id: "music", title: "Music", hint: "Your music, internet radio and visualizers" },
-  { id: "theater", title: "Theater", hint: "Your videos, kept on the desktop: back them up from phones and watch them anywhere" },
+  { id: "theater", title: "Theatre", hint: "Your videos, kept on the desktop: back them up from phones and watch them anywhere" },
   { id: "visualizer", title: "Visualizer", hint: "The music's visualizer in its own window" },
   { id: "vector", title: "Vector", hint: "Your Vector messenger: chats, Communities and Mini Apps" },
   { id: "browser", title: "Browser", hint: "Web pages in tabs, with a reader view" },
@@ -187,7 +187,14 @@ export type StdioSpec = { command: string; args?: string[]; env?: Record<string,
 export type WebPrefs = { search: "auto" | "ollama" | "searxng" | "ddg" | "wikipedia"; searx: string };
 
 /** How requests leave the desktop by default (web search, page reading, http_request, backups, bridges). */
-export type NetPrefs = { via: Via; /** Python for the relay: an executable or its folder; empty = find it. */ python?: string };
+export type NetPrefs = {
+  via: Via;
+  /** Python for the relay: an executable or its folder; empty = find it. */ python?: string;
+  /** Local addresses (this computer, the home network, a tailnet) a character's own requests may reach (lib/netGuard.ts). */
+  localHosts?: string;
+  /** The hosts each key may be sent to by a character's requests, by its name; a key not listed goes anywhere public. */
+  keyHosts?: Record<string, string>;
+};
 
 /** The inbound API: other programs can talk to the characters. */
 export type ApiPrefs = { on: boolean; port: number; lan: boolean; keyName: string };
@@ -351,6 +358,10 @@ export type CharPrefs = {
   storybook?: boolean;
   /** Classic's helper model (auxProv/auxModel): what her background work runs on (journal, memory, heartbeat). */
   helper?: { connection?: string; model?: string };
+  /** Her quick decisions (lib/decide.ts: game steps, quick checks): tried before her helper and her own models. */
+  decider?: { connection?: string; model?: string };
+  /** Her playing model (games and apps where she has a seat): tried first while she plays (agent.ts chainFor). */
+  player?: { connection?: string; model?: string };
   /** Her own budget for work she starts herself (heartbeats, her own time), in tokens: lib/meterCore.ts. She can set it with the usage tool. */
   budget?: { hourTokens?: number; dayTokens?: number };
   /** Time of her own while the house is quiet (lib/ownTimeCore.ts). Off until switched on. */
@@ -470,7 +481,7 @@ export type LibSection = "all" | "games" | "xdc" | "favourites" | "recent";
 
 /** Per app (keyed by game slug or webxdc app key). */
 /** wake: the characters playing answer when a person makes a move (default on for Jade Link). */
-export type AppPrefs = { fav?: boolean; version?: string; separate?: boolean; played?: number; plays?: number; wake?: boolean };
+export type AppPrefs = { fav?: boolean; version?: string; separate?: boolean; played?: number; plays?: number; wake?: boolean; seats?: boolean };
 
 export type State = {
   // desktop
@@ -1019,6 +1030,26 @@ export const useDesk = create<Store>()(
 );
 
 export const desk = () => useDesk.getState();
+
+// The open game outlives a reload of this window (not a fresh start), so characters mid-game keep their game tools
+// and the board comes back where it was.
+if (typeof sessionStorage !== "undefined") {
+  try {
+    const g = JSON.parse(sessionStorage.getItem("pdd-open-game") ?? "null") as GameState | null;
+    if (g && typeof g === "object" && g.kind && g.slug) useDesk.setState({ game: g });
+  } catch {
+    /* nothing to bring back */
+  }
+  useDesk.subscribe((s, prev) => {
+    if (s.game === prev.game) return;
+    try {
+      if (s.game) sessionStorage.setItem("pdd-open-game", JSON.stringify(s.game));
+      else sessionStorage.removeItem("pdd-open-game");
+    } catch {
+      /* storage full or blocked: the game just won't come back after a reload */
+    }
+  });
+}
 
 // The relay needs to know where Python is, when it was set in Connections → Web.
 pythonFrom(() => useDesk.getState().net.python);

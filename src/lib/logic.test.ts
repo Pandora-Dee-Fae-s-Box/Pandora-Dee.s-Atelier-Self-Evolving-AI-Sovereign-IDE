@@ -55,6 +55,9 @@ test("loop breaker catches repeats and long streaks", () => {
 test("replies lose their own name prefix and anything written for others", () => {
   assert.equal(tidyReply(dee, "Dee: hello there\nJade: hi Dee", room), "hello there");
   assert.equal(tidyReply(dee, "**Pandora Dee:** fine", room), "fine");
+  // GLM's transcript label for the speaker: "You:" (Jade, 2026-11-19); the words after it are still hers
+  assert.equal(tidyReply(dee, "You: Ah, apologies for the mix-up.", room), "Ah, apologies for the mix-up.");
+  assert.equal(tidyReply(dee, "Your move, Claude.", room), "Your move, Claude.");
   // any word of their own name counts at the start (Test Fae, short "Test", wrote "Fae:")
   const fae = { ...dee, id: "test-fae", name: "Test Fae", short: "Test" };
   assert.equal(tidyReply(fae, "Fae: Hello, everyone.", room), "Hello, everyone.");
@@ -352,8 +355,8 @@ test("her Classic model, turns and voice become her desktop preferences, and go 
 });
 
 test("her Classic vector memory settings come along, and go back", () => {
-  const conns = [{ id: "box", label: "Ollama on the box", kind: "ollama", baseUrl: "http://192.168.3.9:11434", keyName: "", model: "", enabled: true }] as Parameters<typeof prefsFromClassic>[1];
-  const p = prefsFromClassic({ memoryOn: true, memoryRag: true, memoryRagK: 10, embedModel: "mxbai-embed-large", embedHost: "http://192.168.3.9:11434/", embedNotes: true }, conns);
+  const conns = [{ id: "box", label: "Ollama on the box", kind: "ollama", baseUrl: "http://192.168.1.9:11434", keyName: "", model: "", enabled: true }] as Parameters<typeof prefsFromClassic>[1];
+  const p = prefsFromClassic({ memoryOn: true, memoryRag: true, memoryRagK: 10, embedModel: "mxbai-embed-large", embedHost: "http://192.168.1.9:11434/", embedNotes: true }, conns);
   assert.deepEqual(p.memory, { vectors: true, rag: true, ragK: 10, notes: true, model: "mxbai-embed-large", connection: "box" });
   assert.equal(prefsFromClassic({ model: "x" }, conns).memory, undefined);
   assert.equal(prefsFromClassic({ embedOn: false }, conns).memory?.vectors, false);
@@ -363,7 +366,7 @@ test("her Classic vector memory settings come along, and go back", () => {
   assert.equal(out.settings.embedOn, true);
   assert.equal(out.settings.memoryRagK, 10);
   assert.equal(out.settings.embedModel, "mxbai-embed-large");
-  assert.equal(out.settings.embedHost, "http://192.168.3.9:11434");
+  assert.equal(out.settings.embedHost, "http://192.168.1.9:11434");
 });
 
 test("her Classic thinking, journal, memory, helper model and heartbeat come along, and go back", () => {
@@ -400,6 +403,19 @@ test("tool calls a model wrote as text are found (GLM, <tool_call>, bare JSON), 
   assert.equal(r.rest, "The game state is unknown.");
   r = textToolCalls('app_send_update\n{\n  "payload": {"x": 7, "y": 7}\n}', names);
   assert.deepEqual(r.calls, [{ name: "app_send_update", args: { payload: { x: 7, y: 7 } } }]);
+  // GLM again: the name glued to the end of a sentence, the arguments on the next line; the sentence stays
+  r = textToolCalls("I'll answer at r8, c8.app_send_update\n{\"action\": \"MOVE\", \"r\": 8, \"c\": 8, \"player\": 2}", names);
+  assert.deepEqual(r.calls, [{ name: "app_send_update", args: { action: "MOVE", r: 8, c: 8, player: 2 } }]);
+  assert.equal(r.rest, "I'll answer at r8, c8.");
+  // GLM carrying on talking after the JSON, on the same line (Jade in Logic Garden); braces in strings don't fool it
+  r = textToolCalls('app_send_update\n{"type": "bed", "level": 2, "name": "J}ade"} Let\'s explore the next bed!', names);
+  assert.deepEqual(r.calls, [{ name: "app_send_update", args: { type: "bed", level: 2, name: "J}ade" } }]);
+  assert.equal(r.rest, "Let's explore the next bed!");
+  r = textToolCalls('app_send_update\n{"payload": {"type": "sun",\n "sun": 1}} Waking the first sun.', names);
+  assert.deepEqual(r.calls, [{ name: "app_send_update", args: { payload: { type: "sun", sun: 1 } } }]);
+  assert.equal(r.rest, "Waking the first sun.");
+  // a name inside a word isn't a call
+  assert.equal(textToolCalls("see my_app_updates\n{}", names).calls.length, 0);
   // Qwen / Hermes
   r = textToolCalls('Let me look. <tool_call>{"name": "app_updates", "arguments": {"since": 3}}</tool_call>', names);
   assert.deepEqual(r.calls, [{ name: "app_updates", args: { since: 3 } }]);
@@ -456,4 +472,33 @@ test("the browser route falls back to the relay only when that can't send a requ
   } finally {
     globalThis.fetch = real;
   }
+});
+
+test("textToolCalls catches a call written out in a code block or on its own line, as a guide shows it", () => {
+  const names = ["game_seat_act", "app_updates"];
+  // Jade in Secret Word, 2026-11-19: the guide's example copied exactly, in a json block
+  let r = textToolCalls('```json\n{"name": "game_seat_act", "arguments": {"do": "type", "target": "Letter", "text": "O", "enter": true}}\n```', names);
+  assert.deepEqual(r.calls, [{ name: "game_seat_act", args: { do: "type", target: "Letter", text: "O", enter: true } }]);
+  assert.equal(r.rest, "");
+  r = textToolCalls('My guess is O!\n{"name": "game_seat_act", "arguments": {"do": "type", "target": "Letter", "text": "O"}}\n{"name": "game_seat_act", "arguments": {"do": "click", "target": "Guess"}}', names);
+  assert.equal(r.calls.length, 2);
+  assert.equal(r.rest, "My guess is O!");
+  // a code block that isn't a call stays as it is
+  r = textToolCalls("Here's the board:\n```\n8 r . . k\n```", names);
+  assert.equal(r.calls.length, 0);
+  assert.match(r.rest, /8 r \. \. k/);
+});
+
+import { promptParts as parts2 } from "./room.ts";
+test("for a model on a computer here, the steady half of the prompt never holds what changes from turn to turn", () => {
+  const me = { id: "jade", name: "Jade", short: "Jade" } as never;
+  const base = { me, files: { "SOUL.md": "# Jade\nI love puzzles.", "MEMORY.md": "## What I've learned\n- Gates hold memory" }, room: [me], people: ["Sam"], length: "normal" as const };
+  const a = parts2({ ...base, now: new Date(2026, 10, 19, 21, 5) });
+  const b = parts2({ ...base, now: new Date(2026, 10, 19, 21, 6) });
+  assert.equal(a.steady, b.steady); // a minute later, the steady half is the same, word for word
+  assert.match(a.steady, /I love puzzles/);
+  assert.match(a.steady, /## Where you are/);
+  assert.doesNotMatch(a.steady, /Local time|Gates hold memory/);
+  assert.match(a.moment, /Local time/);
+  assert.match(a.moment, /Gates hold memory/);
 });

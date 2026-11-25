@@ -11,6 +11,7 @@ import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { unzipSync } from "fflate";
 import { netShare, netUse, netView, readPlaces, rememberPlace } from "./music.mjs";
+import { typedName } from "./names.mjs";
 
 const win = process.platform === "win32";
 const mac = process.platform === "darwin";
@@ -43,7 +44,7 @@ export function createFiles({ dataDir, musicFolders, videoFolders = () => [], ge
       { id: "vector", name: "Vector files", path: path.join(d, "vector-host", "downloads"), kind: "vector" },
       { id: "music", name: "Music added here", path: path.join(d, "music"), kind: "music" },
       ...musicFolders().map((f, i) => ({ id: `music-${i}`, name: path.basename(f) || f, path: f, kind: "music" })),
-      // Theater's watched folders (videos played where they are)
+      // Theatre's watched folders (videos played where they are)
       ...videoFolders().map((f, i) => ({ id: `video-${i}`, name: f.name, path: f.path, kind: "video" })),
     ];
     for (const p of list) if ((p.kind !== "music" && p.kind !== "video") || p.id === "music") fs.mkdirSync(p.path, { recursive: true });
@@ -229,7 +230,7 @@ export function createFiles({ dataDir, musicFolders, videoFolders = () => [], ge
 
   function mkdir(dirP, name, local) {
     const parent = allowed(dirP, local);
-    const dir = freeName(parent, safeName(name || "New folder"));
+    const dir = freeName(parent, typedName(name, "New folder"));
     fs.mkdirSync(dir, { recursive: true });
     return dir;
   }
@@ -250,7 +251,7 @@ export function createFiles({ dataDir, musicFolders, videoFolders = () => [], ge
     const from = allowed(fromP, local);
     const dir = into ? allowed(into, local) : path.dirname(from);
     if (inside(dir, from)) throw Object.assign(new Error("A folder can't go inside itself."), { status: 400 });
-    const target = path.join(dir, name ? safeName(name) : path.basename(from));
+    const target = path.join(dir, name ? typedName(name, "file") : path.basename(from));
     if (path.resolve(target).toLowerCase() === path.resolve(from).toLowerCase() && target !== from) {
       fs.renameSync(from, target); // only the letters' case changed
       return target;

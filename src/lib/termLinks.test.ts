@@ -7,7 +7,7 @@ test("local addresses stay out of the full browser", () => {
 });
 
 test("other addresses go to the full browser", () => {
-  for (const u of ["https://example.com/", "http://192.168.3.1:11434", "https://localhost.example.com", "https://github.com/127.0.0.1", "not a url"]) assert.equal(isLocalAddress(u), false, u);
+  for (const u of ["https://example.com/", "http://192.168.1.1:11434", "https://localhost.example.com", "https://github.com/127.0.0.1", "not a url"]) assert.equal(isLocalAddress(u), false, u);
 });
 
 test("the address under a character is found, nothing outside it", () => {

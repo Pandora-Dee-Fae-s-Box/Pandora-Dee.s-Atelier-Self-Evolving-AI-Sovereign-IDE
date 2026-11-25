@@ -39,7 +39,7 @@ test("addresses: both ways, and which are public", () => {
   assert.equal(fromBytes(toBytes("203.0.113.9")), "203.0.113.9");
   assert.equal(unwrap(wrap("10.1.2.3", 30000, Buffer.from("hi"))).ip, "10.1.2.3");
   assert.equal(isPublic("8.8.8.8"), true);
-  for (const ip of ["127.0.0.1", "192.168.3.5", "10.0.0.1", "100.117.100.57", "::1", "fd00::1", "fe80::1"]) assert.equal(isPublic(ip), false, ip);
+  for (const ip of ["127.0.0.1", "192.168.1.5", "10.0.0.1", "100.64.0.7", "::1", "fd00::1", "fe80::1"]) assert.equal(isPublic(ip), false, ip);
 });
 
 test("a Luanti client gets an address, binds, and its game traffic reaches a server and comes back", async () => {

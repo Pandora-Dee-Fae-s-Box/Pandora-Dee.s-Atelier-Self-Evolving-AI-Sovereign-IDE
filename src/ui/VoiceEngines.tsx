@@ -7,6 +7,7 @@ import { AddressField, askAddress } from "./AddressField.tsx";
 import { scopeOf } from "../lib/model.ts";
 import { allowed, blockedBecause } from "../lib/privacy.ts";
 import { defaultSpeechModel, engineUrl, isOpenAI, OPENAI_VOICES, type VoiceEngine } from "../lib/voiceEngines.ts";
+import { ModelChooser } from "./ModelChooser.tsx";
 
 /** Voice engines in Settings → Voice: the servers that speak and listen (usually on another computer). */
 
@@ -33,6 +34,16 @@ async function get(e: VoiceEngine, url: string) {
   const text = await r.text();
   if (!r.ok) throw new Error(`It answered ${r.status}: ${text.slice(0, 160)}`);
   return JSON.parse(text) as Record<string, unknown>;
+}
+
+/** The models an engine has (Scan): MLX Audio's server and OpenAI-style services list them at /v1/models. `want`
+ *  puts the speaking (or listening) ones first, or keeps only them when it can tell. */
+export async function engineModelList(e: VoiceEngine, want: "speech" | "listen"): Promise<string[]> {
+  const j = await get(e, engineUrl(e.url, "models"));
+  const ids = ((j.data as { id: string }[]) ?? []).map((m) => m.id).filter(Boolean);
+  const fits = want === "speech" ? /tts|kokoro|speech|voice|chatterbox|csm|dia|orpheus|spark|outetts|bark/i : /whisper|parakeet|stt|transcri|asr|voxtral/i;
+  const mine = ids.filter((m) => fits.test(m));
+  return mine.length ? mine : ids;
 }
 
 /** The voices an engine offers for its model (Kokoro lists ~50; OpenAI has a fixed set). */
@@ -109,10 +120,15 @@ export function VoiceEnginesEditor() {
             </label>
           </div>
           <div className="row">
-            <label className="mini-field grow">
-              <span>Model</span>
-              <input className="input mono" value={e.model ?? ""} onChange={(ev) => edit(e.id, { model: ev.target.value.trim() || undefined })} aria-label="Speaking model" placeholder={`Speaking model (blank: ${defaultSpeechModel(e.url)})`} />
-            </label>
+            <ModelChooser
+              label="Speaking model"
+              value={e.model ?? ""}
+              onChange={(v) => edit(e.id, { model: v || undefined })}
+              scan={() => engineModelList(e, "speech")}
+              kind={isOpenAI(e.url) ? undefined : "speech"}
+              autoFetch
+              placeholder={`Speaking model (blank: ${defaultSpeechModel(e.url)})`}
+            />
             <button className="btn small" onClick={() => void check(e)}>
               Test
             </button>
@@ -158,7 +174,7 @@ export function ListeningSettings() {
       </label>
       {v.listen.engine ? (
         <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-          <input className="input mono grow" value={v.listen.model} onChange={(e) => set({ model: e.target.value.trim() })} aria-label="Listening model" placeholder="mlx-community/whisper-large-v3-turbo" />
+          <ListenModel engineId={v.listen.engine} value={v.listen.model} onChange={(model) => set({ model })} />
           <input className="input" style={{ width: 160 }} value={v.listen.language} onChange={(e) => set({ language: e.target.value.trim() })} aria-label="Language" placeholder="Language (blank: any)" />
         </div>
       ) : null}
@@ -167,5 +183,22 @@ export function ListeningSettings() {
         check before sending. Phones and other computers need the desktop's https address for the microphone.
       </p>
     </>
+  );
+}
+
+/** The listening model, chosen like the speaking one (Scan, or a well-known one). */
+function ListenModel({ engineId, value, onChange }: { engineId: string; value: string; onChange: (v: string) => void }) {
+  const e = useDesk((s) => s.voices.engines.find((x) => x.id === engineId));
+  if (!e) return null;
+  return (
+    <ModelChooser
+      label="Listening model"
+      value={value}
+      onChange={onChange}
+      scan={() => engineModelList(e, "listen")}
+      kind={isOpenAI(e.url) ? undefined : "listen"}
+      autoFetch
+      placeholder="mlx-community/whisper-large-v3-turbo"
+    />
   );
 }

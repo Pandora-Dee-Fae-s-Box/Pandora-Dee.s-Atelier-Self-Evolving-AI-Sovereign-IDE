@@ -38,3 +38,27 @@ test("the record for a reread reply", () => {
   );
   assert.equal(recordLine(undefined, "Hi Claude! Good luck."), "");
 });
+
+test("a reply with no words after tools ran is caught; one that said something, or used no tools, isn't", async () => {
+  const { saidNothing } = await import("./deskRecord.ts");
+  assert.equal(saidNothing("", "", 8), true);
+  assert.equal(saidNothing("  \n", "", 2), true);
+  assert.equal(saidNothing("Black to the centre.", "", 8), false);
+  assert.equal(saidNothing("", "I should open the game first", 3), false, "thinking out loud is the unsaid note's job");
+  assert.equal(saidNothing("", "", 0), false, "no tools: an empty reply is a pass, not this");
+});
+
+test("a move told in words, not sent, is caught; plain talk isn't", async () => {
+  const { claimsMove } = await import("./deskRecord.ts");
+  for (const t of ["Black star, begone — same shape, now in proper cyan.", "I'll place my white stone at r8, c8.", "My stone goes to the corner.", "Repainted it over the black.", "I'll take e5.", "18…Ne2+! — the zwischenzug.", "17. Qxa7: dessert.", "5...exd4, opening the centre", "9. O-O and safe."])
+    assert.equal(claimsMove(t), true, t);
+  for (const t of ["Good game, Claude!", "That was a clever opening.", "Your move, Jade!", "The board is quiet today.", "Version 0.6.199 is out.", "Step 2. Open the app.", "It took 2.5 seconds."])
+    assert.equal(claimsMove(t), false, t);
+});
+
+test("a world told but not touched: what Dee said in Vexel without one action", async () => {
+  const { claimsWorld } = await import("./deskRecord.ts");
+  assert.equal(claimsWorld("I found a tree and did some honest forestry work — logs in hand, leaves raining"), true);
+  assert.equal(claimsWorld("I dug down three blocks and climbed out"), true);
+  assert.equal(claimsWorld("I'd love to find a tree next. What do you think?"), false);
+});

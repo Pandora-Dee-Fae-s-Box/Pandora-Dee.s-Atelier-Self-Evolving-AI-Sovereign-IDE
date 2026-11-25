@@ -1,8 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { zipSync, strToU8 } from "fflate";
-import { Copy, Download, FilePlus, GitBranch, Play, Save, Sparkles, Trash2 } from "lucide-react";
+import { Copy, Download, FilePlus, GitBranch, Gamepad2, Play, Save, Sparkles, Trash2, Wand2 } from "lucide-react";
+import { StudioMake } from "./StudioMake.tsx";
 import { desk, useDesk } from "../lib/store.ts";
-import { groupApps, library, type Pkg } from "../lib/xdc.ts";
+import { groupApps, library, webImportSaid, type Pkg } from "../lib/xdc.ts";
+import { openMenuAt } from "../ui/ContextMenu.tsx";
+import { pickInExplorer } from "../lib/explorer.ts";
+import { allowed } from "../lib/privacy.ts";
 import { Confirm } from "../ui/common.tsx";
 import { useWidth } from "../ui/hooks.ts";
 import { launch, libraryChanged, useXdcLibrary } from "./Games.tsx";
@@ -62,6 +66,7 @@ export function StudioApp() {
   const [dirty, setDirty] = useState(false);
   const [dir, setDir] = useState("");
   const [ask, setAsk] = useState<"delete" | null>(null);
+  const [making, setMaking] = useState(false);
   const editable = Boolean(pkg?.parent);
   const groups = useMemo(() => groupApps(pkgs), [pkgs]);
 
@@ -127,6 +132,56 @@ export function StudioApp() {
     desk().set({ studioPkg: editableCopy.id });
   };
 
+  // ---- a web game made into a Mini App ----
+  const [importing, setImporting] = useState("");
+  const importWeb = async (from: File | { path: string }, label: string) => {
+    const web = allowed(desk().privacy, "web");
+    setImporting(`Making ${label} into a Mini App${web ? ", and keeping what it loads from the internet" : ""}…`);
+    try {
+      const r = await library.importWeb(from, web);
+      libraryChanged();
+      await reload();
+      desk().set({ studioPkg: r.pkg.id });
+      desk().say(webImportSaid(r, web));
+    } catch (e) {
+      desk().say(e instanceof Error ? e.message : String(e));
+    } finally {
+      setImporting("");
+    }
+  };
+  /** A folder picked on this device, zipped here (keeping its folders) and sent as one file. */
+  const sendFolder = async (list: FileList | null) => {
+    const fs = [...(list ?? [])];
+    if (!fs.length) return;
+    const top = fs[0].webkitRelativePath.split("/")[0] || "game";
+    const files: Record<string, Uint8Array> = {};
+    for (const f of fs) {
+      const rel = f.webkitRelativePath || f.name;
+      if (/(^|\/)(__MACOSX|\.git|node_modules)(\/|$)|\.DS_Store$|Thumbs\.db$/i.test(rel)) continue;
+      files[rel] = new Uint8Array(await f.arrayBuffer());
+    }
+    const zipped = zipSync(files, { level: 0 });
+    await importWeb(new File([zipped as Uint8Array<ArrayBuffer>], `${top}.zip`), top);
+  };
+  const webMenu = (at: HTMLElement) =>
+    openMenuAt(at, [
+      { heading: "A web game from…" },
+      { label: "A folder on this device", run: () => folderPick?.click() },
+      { label: "A .zip or .html on this device", run: () => filePick?.click() },
+      {
+        label: "The desktop (a folder, .zip or .html)…",
+        run: () =>
+          void pickInExplorer({ mode: "open", title: "Which game? (its .zip or .html page; for a folder, open the folder and pick its page)", filters: [{ name: "Web games", extensions: ["zip", "html", "htm"] }] }).then((p) => {
+            const at = p?.[0];
+            if (!at) return;
+            // its page picked inside its folder: the folder is the game
+            void importWeb({ path: /\.html?$/i.test(at) ? at.replace(/[\\/][^\\/]+$/, "") : at }, at.split(/[\\/]/).filter(Boolean).slice(/\.html?$/i.test(at) ? -2 : -1)[0] ?? "the game");
+          }),
+      },
+    ]);
+  const [folderPick, setFolderPick] = useState<HTMLInputElement | null>(null);
+  const [filePick, setFilePick] = useState<HTMLInputElement | null>(null);
+
   const run = (p: Pkg) => {
     const list = groups.get(p.appKey) ?? [p];
     launch(
@@ -168,6 +223,16 @@ export function StudioApp() {
           <button className="btn small" onClick={() => void newApp()}>
             <Sparkles size={14} /> New app from a template
           </button>
+          <button className="btn small" disabled={Boolean(importing)} onClick={(e) => webMenu(e.currentTarget)} title="An HTML, CSS and JavaScript game made into a Mini App you can edit and share">
+            <Gamepad2 size={14} /> Import a web game
+          </button>
+          {importing ? <p className="small faint">{importing}</p> : null}
+          <input ref={setFolderPick} type="file" hidden {...({ webkitdirectory: "" } as Record<string, string>)} onChange={(e) => (void sendFolder(e.target.files), (e.target.value = ""))} />
+          <input ref={setFilePick} type="file" hidden accept=".zip,.html,.htm" onChange={(e) => {
+            const f = e.target.files?.[0];
+            e.target.value = "";
+            if (f) void importWeb(f, f.name.replace(/\.[^.]+$/, ""));
+          }} />
         </div>
         <div className="list">
           {files.map((f) => (
@@ -195,6 +260,11 @@ export function StudioApp() {
               {editable ? (
                 <button className="btn small primary" disabled={!dirty} onClick={() => void save()} title="Ctrl+S">
                   <Save size={14} /> Save
+                </button>
+              ) : null}
+              {editable ? (
+                <button className="btn small" onClick={() => setMaking(true)} title="A picture, music or a sound effect, made and put in the app">
+                  <Wand2 size={14} /> Make…
                 </button>
               ) : null}
               <button className="btn small" onClick={() => void fork()} title="Copy this version into a new one you can edit">
@@ -271,6 +341,18 @@ export function StudioApp() {
           </>
         )}
       </section>
+      {making && pkg ? (
+        <StudioMake
+          pkgId={pkg.id}
+          onClose={() => setMaking(false)}
+          onSaved={(p, use) => {
+            setMaking(false);
+            void library.files(pkg.id).then((list) => (setFiles(list), setPath(/\.(png|jpe?g|webp|gif)$/i.test(p) ? p : (cur) => cur)));
+            void copyText(use);
+            desk().say(`${p} is in the app. To use it (copied, ready to paste): ${use}`);
+          }}
+        />
+      ) : null}
       {ask && pkg ? (
         <Confirm
           title={`Delete ${path}?`}

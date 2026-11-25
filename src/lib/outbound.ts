@@ -18,7 +18,17 @@ export function pythonFrom(fn: () => string | undefined) {
   pythonPath = fn;
 }
 
-export type OutInit = { method?: string; headers?: Record<string, string>; body?: string | Uint8Array; signal?: AbortSignal; timeout?: number };
+export type OutInit = {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string | Uint8Array;
+  signal?: AbortSignal;
+  timeout?: number;
+  /** Don't follow redirects (a key is in the request: it would go along to wherever the redirect leads). */
+  noRedirect?: boolean;
+  /** A character's own request: each redirect hop is checked against the local network (these addresses allowed). */
+  hopGuard?: { local: string };
+};
 
 function b64(bytes: Uint8Array) {
   let s = "";
@@ -85,7 +95,7 @@ export async function outbound(url: string, init: OutInit = {}, via: Via = "desk
     const mixed = typeof location !== "undefined" && location.protocol === "https:" && url.startsWith("http:");
     if (!relayed.has(origin) && !mixed) {
       try {
-        return await fetch(url, { method: init.method, headers: init.headers, body: init.body as BodyInit | undefined, signal: init.signal });
+        return await fetch(url, { method: init.method, headers: init.headers, body: init.body as BodyInit | undefined, signal: init.signal, redirect: init.noRedirect ? "manual" : "follow" });
       } catch (e) {
         if (init.signal?.aborted) throw e;
         if (!safeToResend(init))
@@ -103,6 +113,8 @@ export async function outbound(url: string, init: OutInit = {}, via: Via = "desk
     via: via === "desktop" ? "node" : via,
     python: via === "python" ? pythonPath() || undefined : undefined,
     timeout: init.timeout,
+    ...(init.noRedirect ? { noRedirect: true } : {}),
+    ...(init.hopGuard ? { hopGuard: init.hopGuard } : {}),
     ...(init.body instanceof Uint8Array ? { bodyB64: b64(init.body) } : init.body != null ? { body: init.body } : {}),
   };
   const r = await fetch("/api/relay", { method: "POST", body: JSON.stringify(job), signal: init.signal });

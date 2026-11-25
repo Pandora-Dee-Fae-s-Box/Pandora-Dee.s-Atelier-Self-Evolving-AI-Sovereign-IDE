@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { copyText } from "../lib/clipboard.ts";
 import { Plus, Trash2 } from "lucide-react";
 import { desk, useDesk } from "../lib/store.ts";
-import { comfyInfo, engineAllowed, newEngineId } from "../lib/media.ts";
+import { comfyInfo, downloadModel, downloadStatus, engineAllowed, engineMemory, engineModels, newEngineId } from "../lib/media.ts";
+import { ModelChooser } from "../ui/ModelChooser.tsx";
 import { outbound } from "../lib/outbound.ts";
 import { withMacAddress } from "../lib/mac.ts";
 import { AddressField, askAddress } from "../ui/AddressField.tsx";
@@ -95,12 +97,29 @@ export function EnginesDialog({ type, onClose }: { type: "images" | "songs"; onC
                   <input className="input mono" value={e.keyName ?? ""} onChange={(ev) => edit(e.id, { keyName: ev.target.value.trim() || undefined })} aria-label="Key name in Keys" placeholder="Key name (if any)" />
                 </label>
               </div>
+              {/^https?:\/\/100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(e.url) ? (
+                <div className="small faint">
+                  This is a Tailscale address. When the computer is on your home network too, its home address (192.168.… or 10.…) is
+                  often far faster: Tailscale sometimes relays the traffic through its own servers when it can't connect the two
+                  directly, and songs then crawl (kilobytes a second). Tailscale is still the way to reach it from away.
+                </div>
+              ) : null}
               {e.kind !== "yue2-comfyui" ? (
                 <div className="row">
-                  <label className="mini-field grow">
-                    <span>Model</span>
-                    <input className="input mono" value={e.model ?? ""} onChange={(ev) => edit(e.id, { model: ev.target.value.trim() || undefined })} aria-label="Model" placeholder={e.kind === "comfyui" ? "Checkpoint (blank: its first)" : e.kind === "openai" ? "Model (blank: gpt-image-1)" : e.kind === "acestep" ? "Model (blank: its default)" : e.kind === "mlx-serve" ? "Music model, e.g. MiniMax-Music3-MLX-Serve-8bit" : "Model (blank: the one loaded)"} />
-                  </label>
+                  <ModelChooser
+                    label={e.kind === "comfyui" ? "Checkpoint" : "Model"}
+                    value={e.model ?? ""}
+                    onChange={(v) => edit(e.id, { model: v || undefined })}
+                    scan={() => {
+                      const why = engineAllowed(e.url);
+                      return why ? Promise.reject(new Error(why)) : engineModels(e);
+                    }}
+                    kind={e.kind === "mlx-serve" ? "music" : e.kind === "comfyui" || e.kind === "a1111" ? "picture" : undefined}
+                    memory={e.kind === "mlx-serve" ? () => engineMemory(e as SongEngine) : undefined}
+                    downloader={e.kind === "mlx-serve" ? { start: (id) => downloadModel(e as SongEngine, id), status: (id) => downloadStatus(e as SongEngine, id) } : undefined}
+                    howToGet={e.kind === "comfyui" ? "Get it opens the file's page: put the file in ComfyUI's models/checkpoints, then Scan." : e.kind === "a1111" ? "Get it opens the file's page: put it in the server's models/Stable-diffusion folder (Draw Things: its own model list has these too), then Scan." : undefined}
+                    placeholder={e.kind === "comfyui" ? "Checkpoint (blank: its first)" : e.kind === "openai" ? "Model (blank: gpt-image-1)" : e.kind === "acestep" ? "Model (blank: its default)" : e.kind === "mlx-serve" ? "Music model, e.g. mlx-community/MiniMax-Music3-8bit" : "Model (blank: the one loaded)"}
+                  />
                   {"steps" in e || e.kind === "comfyui" || e.kind === "a1111" ? (
                     <input className="input" type="number" min={1} max={150} style={{ width: 90 }} value={(e as ImageEngine).steps ?? 20} onChange={(ev) => edit(e.id, { steps: Number(ev.target.value) || 20 } as Partial<ImageEngine>)} aria-label="Steps" data-tip="Steps" />
                   ) : null}
@@ -135,6 +154,7 @@ export function EnginesDialog({ type, onClose }: { type: "images" | "songs"; onC
             </button>
           ))}
         </div>
+        {type === "songs" && list.some((e) => e.kind === "mlx-serve") ? <MacUpdateLine /> : null}
         <label className="check small">
           <input type="checkbox" checked={media.characterTools} onChange={(ev) => desk().set({ media: { ...desk().media, characterTools: ev.target.checked } })} />
           <span>
@@ -149,5 +169,36 @@ export function EnginesDialog({ type, onClose }: { type: "images" | "songs"; onC
         </div>
       </div>
     </div>
+  );
+}
+
+/** The one line that updates and restarts the Mac's engines (the music bridge and MLX Audio's server): it fetches the
+ *  newest scripts from this desktop and starts them again through launchd. Run it in Terminal on the Mac. */
+function MacUpdateLine() {
+  const [address, setAddress] = useState("");
+  useEffect(() => {
+    // an address the Mac can reach: a home-network one when there is one, not localhost
+    fetch("/api/pairs")
+      .then((r) => r.json())
+      .then((d: { addresses?: string[] }) => setAddress(d.addresses?.find((a) => !/localhost|127\.0\.0\.1/.test(a)) ?? d.addresses?.[0] ?? location.origin))
+      .catch(() => setAddress(location.origin));
+  }, []);
+  const line = `curl -sL ${address || location.origin}/mac | bash`;
+  return (
+    <details className="small">
+      <summary className="muted">Update or restart the Mac's engines</summary>
+      <p className="muted">
+        In Terminal on the Mac, this one line fetches the newest music bridge from this desktop and starts it (and MLX Audio's
+        server) again. Changing the model doesn't need it: pick one above and the next song loads it.
+      </p>
+      <div className="row" style={{ gap: 6 }}>
+        <code className="grow mono" style={{ overflowWrap: "anywhere" }}>{line}</code>
+        <button className="btn small" onClick={() => void copyText(line)}>Copy</button>
+      </div>
+      <p className="faint">
+        Just a restart of the music bridge: <code>launchctl kickstart -k gui/$(id -u)/org.pandoradee.music-bridge</code> · how they're doing:{" "}
+        <code>bash ~/pandora-bridge/mac-autostart.sh --status</code>
+      </p>
+    </details>
   );
 }

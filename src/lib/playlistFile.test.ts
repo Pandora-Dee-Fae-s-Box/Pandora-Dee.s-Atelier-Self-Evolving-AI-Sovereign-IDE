@@ -4,12 +4,12 @@ import { matchEntries, nameFromFile, parsePlaylist, writeM3u } from "./playlistF
 
 test("M3U with titles, written and read back", () => {
   const text = writeM3u([
-    { path: "\\\\ALICEMOVIES\\movies\\Bluey\\S01E01 Magic Xylophone.mp4", title: "Magic Xylophone", seconds: 420 },
+    { path: "\\\\MEDIA-PC\\movies\\Bluey\\S01E01 Magic Xylophone.mp4", title: "Magic Xylophone", seconds: 420 },
     { path: "C:/Videos/loose.mkv" },
   ]);
   assert.match(text, /^#EXTM3U\n#EXTINF:420,Magic Xylophone\n/);
   assert.deepEqual(parsePlaylist(text), [
-    { path: "\\\\ALICEMOVIES\\movies\\Bluey\\S01E01 Magic Xylophone.mp4", title: "Magic Xylophone", seconds: 420 },
+    { path: "\\\\MEDIA-PC\\movies\\Bluey\\S01E01 Magic Xylophone.mp4", title: "Magic Xylophone", seconds: 420 },
     { path: "C:/Videos/loose.mkv", title: undefined, seconds: undefined },
   ]);
 });
@@ -20,7 +20,7 @@ test("PLS, file: addresses, a byte-order mark and plain lists", () => {
 });
 
 test("entries found by path, or by the folders above the name; what isn't here is counted", () => {
-  const here = ["\\\\ALICEMOVIES\\movies\\SpongeBob\\Season 1\\ep1.mp4", "\\\\ALICEMOVIES\\movies\\SpongeBob\\Season 2\\ep1.mp4", "F:\\vault\\Videos\\Kids\\Frozen.mp4"];
+  const here = ["\\\\MEDIA-PC\\movies\\SpongeBob\\Season 1\\ep1.mp4", "\\\\MEDIA-PC\\movies\\SpongeBob\\Season 2\\ep1.mp4", "F:\\vault\\Videos\\Kids\\Frozen.mp4"];
   const r = matchEntries(
     [{ path: "Season 2/ep1.mp4" }, { path: "D:\\old pc\\Kids\\frozen.MP4" }, { path: "gone.mp4" }, { path: "http://radio.example/stream" }],
     here,

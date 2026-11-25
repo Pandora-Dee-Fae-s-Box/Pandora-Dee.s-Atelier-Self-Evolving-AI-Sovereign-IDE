@@ -1,4 +1,4 @@
-// Media Theater: a home for videos on the desktop, so phones can let go of them and still watch them anywhere.
+// Media Theatre: a home for videos on the desktop, so phones can let go of them and still watch them anywhere.
 // Videos live in the vault's "Videos" folder (each folder inside it is a shelf), plus any video that came in through
 // the phone's share menu (Vault › From devices). Uploads arrive in checked pieces and can pick up where they stopped,
 // so a big video survives a dropped Wi-Fi connection. Thumbnails and favourites are kept in the vault's .pandora
@@ -7,6 +7,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { typedName } from "./names.mjs";
+import { parseYouTube, watchUrl, youTubeInfo, youTubeThumb } from "./youtube.mjs";
 
 export const VIDEO_EXT = new Set(["mp4", "m4v", "mov", "webm", "mkv", "3gp", "avi", "ogv"]);
 /** The most one upload piece may be; the desktop's page sends 8 MB. */
@@ -21,20 +25,23 @@ export function createTheater({ vaultDir }) {
   const parts = () => path.join(meta(), "parts");
 
   const fail = (status, message) => Object.assign(new Error(message), { status });
-  const safe = (n, fallback) => path.basename(String(n || "")).replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/^\.+/, "").trim().slice(0, 120) || fallback;
+  // shelf and folder names read the way they were typed (names.mjs)
+  const safe = typedName;
+  /** A file sent from a device: its own name, and only that (a path that came with it counts for nothing). */
+  const fileName = (n) => safe(path.basename(String(n || "").replace(/\\/g, "/")), "video.mp4");
   /** A video's id: its size and modified time, which stay the same through a rename or a move. */
   const idOf = (st) => `${st.size.toString(36)}-${Math.round(st.mtimeMs / 1000).toString(36)}`;
 
   function readMeta() {
     try {
       const j = JSON.parse(fs.readFileSync(metaFile(), "utf8"));
-      return { favs: j.favs ?? {}, seconds: j.seconds ?? {}, playlists: Array.isArray(j.playlists) ? j.playlists : [], folders: Array.isArray(j.folders) ? j.folders.filter((f) => f && typeof f.path === "string") : [], collections: Array.isArray(j.collections) ? j.collections : [], from: j.from && typeof j.from === "object" ? j.from : {} };
+      return { favs: j.favs ?? {}, seconds: j.seconds ?? {}, playlists: Array.isArray(j.playlists) ? j.playlists : [], folders: Array.isArray(j.folders) ? j.folders.filter((f) => f && typeof f.path === "string") : [], collections: Array.isArray(j.collections) ? j.collections : [], from: j.from && typeof j.from === "object" ? j.from : {}, links: Array.isArray(j.links) ? j.links.filter((l) => l && typeof l.yt === "string") : [] };
     } catch {
-      return { favs: {}, seconds: {}, playlists: [], folders: [], collections: [], from: {} };
+      return { favs: {}, seconds: {}, playlists: [], folders: [], collections: [], from: {}, links: [] };
     }
   }
 
-  // Folders watched where they are (a network share like \\ALICEMOVIES\movies, or a folder on this computer): each is
+  // Folders watched where they are (a network share like \\MEDIA-PC\movies, or a folder on this computer): each is
   // a shelf of its own, played from there; nothing is copied into the vault, and nothing in them is moved or changed.
   const folders = () => readMeta().folders;
   function addFolder(p, name) {
@@ -72,6 +79,14 @@ export function createTheater({ vaultDir }) {
   function list(fresh = false) {
     fs.mkdirSync(root(), { recursive: true });
     const m = readMeta();
+    // which thumbnails there are, read once (not two looks per video: thousands on a big library)
+    let have = new Set();
+    try {
+      have = new Set(fs.readdirSync(thumbs()));
+    } catch {
+      /* none made yet */
+    }
+    const thumbOf = (id) => (have.has(`${id}.jpg`) ? 1 : have.has(`${id}.none`) ? -1 : 0);
     const out = [];
     const shelves = [];
     // (rel: the folder inside the shelf a video is in, "Show/Season 1", so shelves can be browsed show by show)
@@ -109,7 +124,7 @@ export function createTheater({ vaultDir }) {
           size: st.size,
           mtime: st.mtimeMs,
           seconds: m.seconds[id] ?? 0,
-          thumb: fs.existsSync(path.join(thumbs(), `${id}.jpg`)) ? 1 : fs.existsSync(path.join(thumbs(), `${id}.none`)) ? -1 : 0,
+          thumb: thumbOf(id),
           fav: Boolean(m.favs[id]),
         });
       }
@@ -129,7 +144,7 @@ export function createTheater({ vaultDir }) {
           ...v,
           shelf: f.name,
           seconds: m.seconds[v.id] ?? 0,
-          thumb: fs.existsSync(path.join(thumbs(), `${v.id}.jpg`)) ? 1 : fs.existsSync(path.join(thumbs(), `${v.id}.none`)) ? -1 : 0,
+          thumb: thumbOf(v.id),
           fav: Boolean(m.favs[v.id]),
           watched: true,
         });
@@ -138,6 +153,11 @@ export function createTheater({ vaultDir }) {
       const before = out.length;
       walk(fromDevices(), "From devices", 1);
       if (out.length > before) shelves.push("From devices");
+    }
+    // YouTube links, each on its shelf (youtube.mjs): played from YouTube, with the title and thumbnail kept here
+    for (const l of m.links) {
+      out.push({ id: l.id, path: watchUrl(l.yt), name: l.title || "A YouTube video", ext: "youtube", shelf: l.shelf ?? "", folder: "", size: 0, mtime: l.added ?? 0, seconds: m.seconds[l.id] ?? 0, thumb: thumbOf(l.id), fav: Boolean(m.favs[l.id]), link: "youtube", yt: l.yt, start: l.start || 0, author: l.author || "" });
+      if (l.shelf && !shelves.includes(l.shelf)) shelves.push(l.shelf);
     }
     out.sort((a, b) => b.mtime - a.mtime);
     shelves.sort((a, b) => (a === "From devices") - (b === "From devices") || a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
@@ -184,7 +204,7 @@ export function createTheater({ vaultDir }) {
     return run;
   }
 
-  /** Which of these (name and size, from a phone) are already kept here, anywhere in the Theater. */
+  /** Which of these (name and size, from a phone) are already kept here, anywhere in the Theatre. */
   function have(items) {
     const all = list().videos;
     const key = (name, size) => `${String(name).toLowerCase()}\u0000${size}`;
@@ -295,6 +315,7 @@ export function createTheater({ vaultDir }) {
     fs.renameSync(from, target);
     const m = readMeta();
     rekey(m, shelf, n);
+    for (const l of m.links) if (l.shelf === shelf) l.shelf = n;
     for (const k of Object.keys(m.from))
       if (k === shelf || k.startsWith(`${shelf}/`)) {
         m.from[n + k.slice(shelf.length)] = m.from[k];
@@ -310,7 +331,7 @@ export function createTheater({ vaultDir }) {
 
   /** How much of this upload is here already (to carry on after a dropped connection). */
   function uploadState({ shelf, name, size }) {
-    const n = safe(name, "video.mp4");
+    const n = fileName(name);
     const p = partFile(shelf, n, Number(size));
     return { have: fs.existsSync(p) ? fs.statSync(p).size : 0 };
   }
@@ -321,8 +342,8 @@ export function createTheater({ vaultDir }) {
     if (!Number.isFinite(total) || total <= 0) throw fail(400, "How big is it?");
     if (!Number.isFinite(at) || at < 0) throw fail(400, "Where does this piece go?");
     if (bytes.length > PIECE_MAX) throw fail(413, "That piece is too big.");
-    const n = safe(name, "video.mp4");
-    if (!VIDEO_EXT.has(path.extname(n).slice(1).toLowerCase())) throw fail(400, `${n} isn't a video the Theater keeps (mp4, mov, webm, mkv…).`);
+    const n = fileName(name);
+    if (!VIDEO_EXT.has(path.extname(n).slice(1).toLowerCase())) throw fail(400, `${n} isn't a video the Theatre keeps (mp4, mov, webm, mkv…).`);
     if (sha256 && crypto.createHash("sha256").update(bytes).digest("hex") !== String(sha256).toLowerCase()) throw fail(422, "That piece arrived damaged; sending it again.");
     fs.mkdirSync(parts(), { recursive: true });
     const p = partFile(shelf, n, total);
@@ -332,6 +353,31 @@ export function createTheater({ vaultDir }) {
     fs.appendFileSync(p, bytes);
     const now = have + bytes.length;
     if (now < total) return { have: now, done: false, path: null };
+    return fileUpload(p, { shelf, n, total, modified, device });
+  }
+
+  /** The whole video in one go, streamed to disk: for a phone that won't let the page read a chosen file in pieces
+   *  (the way the Explorer uploads, which such phones still allow). It starts over rather than carrying on. */
+  async function uploadWhole({ shelf, name, size, modified, device }, stream) {
+    const total = Number(size);
+    if (!Number.isFinite(total) || total <= 0) throw fail(400, "How big is it?");
+    const n = fileName(name);
+    if (!VIDEO_EXT.has(path.extname(n).slice(1).toLowerCase())) throw fail(400, `${n} isn't a video the Theatre keeps (mp4, mov, webm, mkv…).`);
+    fs.mkdirSync(parts(), { recursive: true });
+    const p = partFile(shelf, n, total);
+    let got = 0;
+    const count = new Transform({
+      transform(chunk, _e, done) {
+        got += chunk.length;
+        done(got > total ? fail(400, "That's more than the whole video.") : null, chunk);
+      },
+    });
+    await pipeline(stream, count, fs.createWriteStream(p));
+    if (got !== total) return { have: got, done: false, path: null };
+    return fileUpload(p, { shelf, n, total, modified, device });
+  }
+
+  function fileUpload(p, { shelf, n, total, modified, device }) {
     // all here: into its shelf, under a free name, with the phone's own date so it sorts where it belongs
     const dir = shelfDir(shelf);
     fs.mkdirSync(dir, { recursive: true });
@@ -348,7 +394,7 @@ export function createTheater({ vaultDir }) {
 
   /** Throw away an unfinished upload. */
   function dropUpload({ shelf, name, size }) {
-    fs.rmSync(partFile(shelf, safe(name, "video.mp4"), Number(size)), { force: true });
+    fs.rmSync(partFile(shelf, fileName(name), Number(size)), { force: true });
   }
 
   /** Unfinished uploads nobody came back to for a week. */
@@ -423,7 +469,7 @@ export function createTheater({ vaultDir }) {
       if (Array.isArray(items)) m.collections[i].items = [...new Set(list)];
     }
     const c = m.collections[i];
-    // what toddler mode shows in the Theater (only collections marked for it)
+    // what toddler mode shows in the Theatre (only collections marked for it)
     if (typeof kids === "boolean") c.kids = kids;
     // moved among the collections
     if (Number.isInteger(at)) {
@@ -455,7 +501,42 @@ export function createTheater({ vaultDir }) {
     return { fav: Boolean(on) };
   }
 
-  /** May this request touch this file? Only videos inside the Theater's own folders. */
+  /** May this request touch this file? Only videos inside the Theatre's own folders. */
+  // ---- YouTube links ----
+  const linkId = (yt) => `yt-${crypto.createHash("sha1").update(yt).digest("hex").slice(0, 10)}`;
+  /** A YouTube link added to a shelf ("YouTube" unless another is chosen). Its title and thumbnail are fetched once
+   *  and kept; the same video added again just moves to that shelf. */
+  async function addLink(text, shelf, fetchFn = fetch) {
+    const p = parseYouTube(text);
+    if (!p) throw fail(400, "That isn't a YouTube video link.");
+    const to = safe(shelf, "YouTube");
+    const id = linkId(p.yt);
+    const m0 = readMeta();
+    const had = m0.links.find((l) => l.yt === p.yt);
+    const [info, thumb] = had ? [{}, null] : await Promise.all([youTubeInfo(p.yt, fetchFn), youTubeThumb(p.yt, fetchFn)]);
+    if (thumb) setThumb(id, thumb);
+    mkShelf(to);
+    const m = readMeta();
+    const l = m.links.find((x) => x.yt === p.yt);
+    if (l) l.shelf = to;
+    else m.links.push({ id, yt: p.yt, start: p.start, title: info.title || "", author: info.author || "", shelf: to, added: Date.now() });
+    writeMeta(m);
+    return { id, shelf: to, title: l?.title || info.title || "", again: Boolean(l) };
+  }
+  /** A link taken out of the Theatre (its kept thumbnail, place and favourite go with it). */
+  function dropLink(id) {
+    const m = readMeta();
+    const l = m.links.find((x) => x.id === checkId(id));
+    if (!l) throw fail(404, "That link isn't in the Theatre any more.");
+    m.links = m.links.filter((x) => x !== l);
+    delete m.favs[l.id];
+    delete m.seconds[l.id];
+    for (const pl of m.playlists) if (Array.isArray(pl.items)) pl.items = pl.items.filter((x) => x !== l.id);
+    writeMeta(m);
+    fs.rmSync(thumbFile(l.id), { force: true });
+    return { ok: true };
+  }
+
   function owns(p) {
     const full = path.resolve(String(p || ""));
     const inside = (r) => full.toLowerCase().startsWith(path.resolve(r).toLowerCase() + path.sep);
@@ -464,6 +545,16 @@ export function createTheater({ vaultDir }) {
 
   /** Onto another shelf ("" = straight in Videos). */
   function moveTo(p, shelf) {
+    const link = parseYouTube(p);
+    if (link && /^https:\/\//.test(String(p))) {
+      const m = readMeta();
+      const l = m.links.find((x) => x.yt === link.yt);
+      if (!l) throw fail(404, "That link isn't in the Theatre any more.");
+      l.shelf = String(shelf ?? "") ? safe(shelf, "") : "";
+      if (l.shelf) mkShelf(l.shelf);
+      writeMeta(m);
+      return watchUrl(l.yt);
+    }
     const from = owns(p);
     if (!from || !fs.existsSync(from)) throw fail(404, "That video isn't there any more.");
     const dir = shelfDir(shelf);
@@ -476,5 +567,5 @@ export function createTheater({ vaultDir }) {
     return target;
   }
 
-  return { root, list, folders, addFolder, dropFolder, addToShelf, renameShelf, renameFolder, saveCollection, dropCollection, have, mkShelf, uploadState, uploadPiece, dropUpload, sweep, thumbFile, setThumb, setFav, owns, moveTo, savePlaylist, dropPlaylist };
+  return { root, list, folders, addFolder, addLink, dropLink, dropFolder, addToShelf, renameShelf, renameFolder, saveCollection, dropCollection, have, mkShelf, uploadState, uploadPiece, uploadWhole, dropUpload, sweep, thumbFile, setThumb, setFav, owns, moveTo, savePlaylist, dropPlaylist };
 }

@@ -4,6 +4,7 @@ import { desk } from "./store.ts";
 import { outbound } from "./outbound.ts";
 import { pageToMarkdown } from "./jadeCore.ts";
 import { allKeyValues } from "./residentKeys.ts";
+import { keysIn, refusal } from "./netGuard.ts";
 
 const send = (url: string, init: Parameters<typeof outbound>[1] = {}) => outbound(url, init, desk().net.via);
 
@@ -116,12 +117,17 @@ export async function webSearch(query: string, max = 5): Promise<string> {
 }
 
 /** A web page as readable text: Ollama's reader with a key, otherwise r.jina.ai. */
+/** The rules a character's own requests follow (lib/netGuard.ts), from Connections → Web and Keys. */
+const guardRules = () => ({ localHosts: desk().net.localHosts, keyHosts: desk().net.keyHosts, self: typeof location !== "undefined" ? location.host : "" });
+
 export async function webFetch(url: string): Promise<string> {
   if (!/^https?:\/\//.test(url)) throw new Error("The address must start with http:// or https://");
+  const why = refusal(url, [], guardRules());
+  if (why) throw new Error(why);
   // first: fetch it ourselves (through the desktop relay, so no CORS) and turn it into Markdown here, with
   // Jade's Rust core, the way Jade Vault 2.20 does on the phone: no third-party reader sees the page
   try {
-    const r = await send(url, { headers: { Accept: "text/html,application/xhtml+xml,text/plain;q=0.9,application/json;q=0.8,*/*;q=0.5" }, timeout: 30 });
+    const r = await send(url, { headers: { Accept: "text/html,application/xhtml+xml,text/plain;q=0.9,application/json;q=0.8,*/*;q=0.5" }, timeout: 30, hopGuard: { local: desk().net.localHosts ?? "" } });
     if (r.ok) {
       const ct = r.headers.get("content-type") ?? "";
       const buf = new Uint8Array(await r.arrayBuffer());
@@ -193,7 +199,9 @@ export type HttpArgs = {
  * PDFs, .xdc apps) are handed to `saveBinary`, which returns where they were kept.
  */
 export async function httpRequest(a: HttpArgs, saveBinary: (bytes: Uint8Array, name: string, type: string) => Promise<string>, env: Record<string, string> = desk().env): Promise<string> {
-  const fill = (t: string) => fillSecrets(t, env);
+  // (each key filled in is noted: where it may go is checked before anything is sent)
+  const used = new Set<string>();
+  const fill = (t: string) => fillSecrets(t.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (m, n: string) => (env[n] != null && used.add(n), m)), env);
   const method = String(a.method || "GET").toUpperCase();
   if (!["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].includes(method)) throw new Error(`Method ${method} isn't supported.`);
   let url = fill(String(a.url || ""));
@@ -220,17 +228,26 @@ export async function httpRequest(a: HttpArgs, saveBinary: (bytes: Uint8Array, n
     if (method === "GET" || method === "HEAD") throw new Error(`${method} can't have a body.`);
     body = fill(String(a.body));
   }
+  // where it may go: not SEASIDE itself, not the local network unless listed, and each key only to its hosts (also a
+  // key that was already filled in, by a playbook or by hand)
+  keysIn(`${url}\n${Object.values(headers).join("\n")}\n${body ?? ""}`, env, used);
+  const why = refusal(url, used, guardRules());
+  if (why) throw new Error(redact(why));
   const seconds = Math.min(120, Math.max(1, Number(a.timeout) || 30));
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), seconds * 1000);
   let res: Response;
   try {
-    res = await send(url, { method, headers, body, signal: ctrl.signal, timeout: seconds });
+    res = await send(url, { method, headers, body, signal: ctrl.signal, timeout: seconds, noRedirect: used.size > 0, hopGuard: { local: desk().net.localHosts ?? "" } });
   } catch (e) {
     throw new Error(ctrl.signal.aborted ? `No answer within ${seconds} seconds.` : `Couldn't reach it (${e instanceof Error ? e.message : e}). `);
   } finally {
     window.clearTimeout(timer);
   }
+  if (used.size && (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400 && res.status !== 304)))
+    return redact(
+      `HTTP ${res.status || "redirect"}\n\nIt redirected${res.headers.get("location") ? ` to ${res.headers.get("location")}` : ""}. With keys in the request (${[...used].join(", ")}), redirects aren't followed, since a key would go along to wherever it leads. Ask the new address directly if it's where you meant to go.`,
+    );
   const head = KEEP_HEADERS.map((h) => (res.headers.get(h) ? `${h}: ${res.headers.get(h)}` : "")).filter(Boolean).join("\n");
   const type = res.headers.get("content-type") ?? "";
   let out = "";

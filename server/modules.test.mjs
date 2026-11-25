@@ -65,4 +65,10 @@ test("manifests are checked", () => {
   assert.throws(() => checkManifest({ seaside: 1, kind: "skill", name: "x", files: ["../../etc/passwd"] }), /isn't a file under skills/);
   assert.throws(() => checkManifest({ seaside: 1, kind: "xdc", name: "x", release: { url: "https://a/b.xdc" } }), /sha256/);
   assert.equal(checkManifest({ seaside: 1, kind: "mcp", name: "pandora-mcp", mcp: { command: "node", args: ["s.cjs"] } }).kind, "mcp");
+  // a tool server names the keys it needs; it never carries a value, or sets the computer's own variables
+  const withKeys = { seaside: 1, kind: "mcp", name: "pandora-mcp", mcp: { command: "node", args: ["s.cjs"], env: { GITHUB_PRIVATE_KEY: "${GITHUB_PRIVATE_KEY}" } } };
+  assert.deepEqual(checkManifest(withKeys).mcp.env, { GITHUB_PRIVATE_KEY: "${GITHUB_PRIVATE_KEY}" });
+  assert.throws(() => checkManifest({ ...withKeys, mcp: { command: "node", env: { GITHUB_TOKEN: "ghp_realvalue" } } }), /never hold a value/);
+  assert.throws(() => checkManifest({ ...withKeys, mcp: { command: "node", env: { PATH: "${PATH}" } } }), /can't be set by a module/);
+  assert.throws(() => checkManifest({ ...withKeys, mcp: { command: "node", env: { NODE_OPTIONS: "${X}" } } }), /can't be set by a module/);
 });

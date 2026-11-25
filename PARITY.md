@@ -153,7 +153,11 @@ an enhanced build adds is **off until you turn it on** in that app's Config, so 
 behaves like the original it is built from. They are built from the upstream sources with patches and a script
 kept outside this repo (a separate `classic-enhanced` folder: `build.sh --install`, patches in `patches/`).
 
-**Pandora Dee 2.10.2** and **Jade Vault 2.25.0-enhanced** are the newest, and the defaults (2.10.2 adds her first notes in her own voice, and a Where I Am note, to 2.10.1). They're built from the
+**Pandora Dee 2.10.7** and **Jade Vault 2.25.0-enhanced.1** are the newest, and the defaults. Since 2.10.2 (her first
+notes in her own voice, and a Where I Am note): bridges keep to their rooms (2.10.4), the HTTP API token stays out of
+backups (2.10.5), chats can be read while a turn runs and web_search says why it failed (2.10.6), and Vector's digest
+mode and curiosity's thread clustering and loop halt (2.10.7; 2.10.5 and 2.10.6 aren't kept separately here). See each
+fork's CHANGELOG for the rest. They're built from the
 AETHER-ENGINEERS forks' main branches (`scripts/build-web.sh`, then `dist/pandora-dee.html` and `dist/jade-vault.html`).
 Both add the People layer (names, not ranks), the Vault Tree (a new chat is a new branch), the context guard's
 "exceeded max context length by N tokens" fix and the Storybook (Config → Memory, off until switched on). Pandora
