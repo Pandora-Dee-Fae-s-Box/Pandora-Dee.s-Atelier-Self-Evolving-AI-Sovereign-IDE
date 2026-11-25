@@ -27,6 +27,7 @@ import { createEngine } from "./engine.mjs";
 import { createUngoogled, DOWNLOADS } from "./ungoogled.mjs";
 import { createVecMem } from "./vecmem.mjs";
 import { createMcpStdio } from "./mcpstdio.mjs";
+import { createNgit } from "./ngit.mjs";
 import { createResidentKeys } from "./residentKeys.mjs";
 import { createHeart } from "./heart.mjs";
 import { createDeskState } from "./deskState.mjs";
@@ -182,6 +183,7 @@ export function deskServer() {
   });
   const modules = createModules({ dataDir: () => dataDir, importXdc: (bytes, name) => library().importAny(bytes, name) });
   const stdio = createMcpStdio();
+  const ngit = createNgit({ stdio, config: readConfig().ngitReader });
   // Media Theatre: videos kept in the vault (see theater.mjs)
   const theater = createTheater({ vaultDir: () => path.join(dataDir, "vault") });
   // Classic opened on its own (a plain browser tab), paired with this desktop to use its relay (see pairs.mjs)
@@ -545,6 +547,20 @@ export function deskServer() {
         return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
       }
     }
+    if (parts[0] === "ngit") {
+      if (!fromOwnPage(req)) return send(res, 403, { error: PAGES_ONLY });
+      try {
+        if (parts[1] === "tools" && m === "GET") return send(res, 200, await ngit.tools());
+        if (parts[1] === "config" && m === "GET") return send(res, 200, ngit.config());
+        if (parts[1] === "call" && m === "POST") {
+          const b = JSON.parse((await readBody(req, 20_000_000)).toString("utf8") || "{}");
+          return send(res, 200, await ngit.call(String(b.name || ""), b.args ?? {}));
+        }
+        return send(res, 404, { error: "No such ngit route." });
+      } catch (e) {
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
     if (parts[0] === "vecmem" && m === "POST") {
       try {
         return send(res, 200, vecmem.run(JSON.parse((await readBody(req, 50_000_000)).toString("utf8") || "{}")));
@@ -836,812 +852,342 @@ export function deskServer() {
         if (parts[1] === "folder" && m === "POST") {
           if (!onThisPc(req)) return send(res, 403, { error: "Folders are added to the Theatre on the desktop's own computer." });
           const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
-          return send(res, 200, b.drop ? theater.dropFolder(b.path) : theater.addFolder(files().allowed(b.path, true), b.name));
+          return send(res, 200, b.drop ? theater.dropFolder(b.path) : theater.addFolder(b.path));
+        }
+        if (parts[1] === "video" && m === "GET") {
+          const id = String(p.id || "");
+          const shelf = String(p.shelf || "");
+          const info = theater.find(id, shelf);
+          if (!info) return send(res, 404, { error: "Not found" });
+          return serveRange(req, res, info.file);
         }
         if (parts[1] === "thumb" && m === "GET") {
-          const f = theater.thumbFile(p.id);
-          if (!fs.existsSync(f)) return send(res, 404, "No thumbnail yet", "text/plain");
-          res.setHeader("Content-Type", "image/jpeg");
-          res.setHeader("Cache-Control", "max-age=31536000, immutable");
-          return fs.createReadStream(f).pipe(res);
+          const id = String(p.id || "");
+          const shelf = String(p.shelf || "");
+          const info = theater.find(id, shelf);
+          if (!info || !info.thumb) return send(res, 404, { error: "No thumb" });
+          return serveFile(res, info.thumb);
         }
-        if (parts[1] === "thumb" && m === "POST") return send(res, 200, (theater.setThumb(p.id, await readBody(req, 2_000_000), p.seconds), { ok: true }));
-        if (parts[1] === "upload") {
-          if (m === "GET") return send(res, 200, theater.uploadState(p));
-          if (m === "DELETE") return send(res, 200, (theater.dropUpload(p), { ok: true }));
-          if (m === "POST" && p.whole) return send(res, 200, await theater.uploadWhole(p, req));
-          if (m === "POST") return send(res, 200, theater.uploadPiece({ ...p, sha256: req.headers["x-sha256"] }, await readBody(req, PIECE_MAX)));
+        if (parts[1] === "delete" && m === "POST") {
+          if (!onThisPc(req)) return send(res, 403, { error: "Videos are removed on the desktop's own computer." });
+          return send(res, 200, theater.remove(String(p.id || ""), String(p.shelf || "")));
         }
-        if (m === "POST") {
-          const b = JSON.parse((await readBody(req, 2_000_000)).toString("utf8") || "{}");
-          if (parts[1] === "have") return send(res, 200, { have: theater.have(b.items) });
-          if (parts[1] === "shelf") return send(res, 200, { shelf: theater.mkShelf(b.name, b.device) });
-          // a shelf, or a show inside one, added to another shelf (moved there); a shelf renamed
-          if (parts[1] === "add-to-shelf") return send(res, 200, theater.addToShelf(String(b.shelf ?? ""), String(b.folder ?? ""), String(b.to ?? "")));
-          if (parts[1] === "rename-shelf") return send(res, 200, theater.renameShelf(String(b.shelf ?? ""), b.name));
-          if (parts[1] === "rename-folder") return send(res, 200, theater.renameFolder(String(b.shelf ?? ""), String(b.folder ?? ""), b.name));
-          if (parts[1] === "fav") return send(res, 200, theater.setFav(b.id, Boolean(b.on)));
-          if (parts[1] === "playlist") return send(res, 200, b.drop ? theater.dropPlaylist(String(b.id || "")) : theater.savePlaylist(b));
-          if (parts[1] === "collection") return send(res, 200, b.drop ? theater.dropCollection(String(b.id || "")) : theater.saveCollection(b));
-          if (parts[1] === "move") return send(res, 200, { path: theater.moveTo(b.path, b.shelf) });
-          // a YouTube link onto a shelf (its title and thumbnail fetched once), or taken out
-          if (parts[1] === "link") return send(res, 200, b.drop ? theater.dropLink(String(b.id || "")) : await theater.addLink(String(b.url ?? ""), String(b.shelf ?? "")));
-        }
+        return send(res, 404, { error: "Not found" });
       } catch (e) {
         return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
       }
     }
-    // folders linked for the characters to read (library/<name>/… in their files); see library.mjs
-    if (parts[0] === "library") {
-      const who = String(url.searchParams.get("who") || "");
-      const local = onThisPc(req);
+    if (parts[0] === "webxdc") {
+      // the library of webxdc apps (xdc.mjs): list, import, download, delete
       try {
-        // the fserve: a big file's link (a ticket for that one file, good for a day), for whoever was given it
-        if (m === "GET" && parts[1] === "get" && parts[2]) {
-          const t = linked.redeem(decodeURIComponent(parts[2]));
-          if (!t) return send(res, 410, "That link has run out. Ask for the file again.", "text/plain");
-          res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(t.name)}`);
-          return serveRange(req, res, t.full);
+        if (parts[1] === "list" && m === "GET") return send(res, 200, L.list());
+        if (parts[1] === "import" && m === "POST") {
+          const name = decodeURIComponent(String(req.headers["x-filename"] || "app.xdc"));
+          const r = L.importAny(await readBody(req, 300_000_000), name);
+          return send(res, 200, { added: r.added.length, duplicates: r.duplicates, id: r.found[0]?.id ?? null, errors: r.errors });
         }
-        if (m === "GET") {
-          if (parts[1] === "links") return send(res, 200, { links: linked.links().map((l) => ({ name: l.name, for: l.for, serve: Boolean(l.serve), ...(local ? { path: l.path } : {}) })), canChange: local });
-          // what a character hands out: her shelves, a search, all of it
-          if (parts[1] === "shelves") return send(res, 200, { shelves: linked.shelves(who), count: linked.catalog(who).length });
-          if (parts[1] === "find") return send(res, 200, { files: linked.find(who, url.searchParams.get("q")) });
-          if (parts[1] === "catalog") return send(res, 200, { files: linked.catalog(who, Boolean(url.searchParams.get("fresh"))) });
-          // one file handed out: its bytes (to attach), only to the page on this computer that runs the bridges
-          if (parts[1] === "bytes") {
-            if (!local) return send(res, 403, { error: "Files are handed out from the desktop's own computer." });
-            const f = linked.pick(who, url.searchParams.get("which"));
-            if (f.size > 25 * 1048576) return send(res, 413, { error: "That one is too big to attach; it goes as a link." });
-            return serveRange(req, res, f.full);
-          }
-          if (parts[1] === "list") return send(res, 200, { entries: linked.list(who, url.searchParams.get("path")) });
-          if (parts[1] === "read") return send(res, 200, { text: linked.readFile(who, url.searchParams.get("path")) });
-          if (parts[1] === "search") return send(res, 200, { hits: linked.search(who, url.searchParams.get("q"), url.searchParams.get("within") || "") });
+        if (parts[1] === "download" && m === "POST") {
+          const b = JSON.parse((await readBody(req, 50_000)).toString("utf8") || "{}");
+          const r = await L.download(String(b.id || ""), String(b.url || ""));
+          return send(res, 200, r);
         }
-        if (m === "POST") {
-          if (!local) return send(res, 403, { error: "Folders are linked for the characters on the desktop's own computer." });
-          const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
-          if (parts[1] === "link") return send(res, 200, linked.link({ path: files().allowed(b.path, local), name: b.name, for: b.for }));
-          if (parts[1] === "unlink") return send(res, 200, linked.unlink(b.path));
-          if (parts[1] === "serve") return send(res, 200, linked.setServe(b.path, b.on));
-          // a file about to be handed out: which it is, its SHA-256, and (for a big one) a link's ticket
-          if (parts[1] === "fetch") {
-            const f = linked.pick(String(b.who || ""), b.which);
-            const { full: _full, ...file } = f;
-            return send(res, 200, { file, sha256: await linked.sha256(f), ticket: b.link ? linked.ticket(f) : undefined });
+        if (parts[1] === "delete" && m === "POST") {
+          const b = JSON.parse((await readBody(req, 50_000)).toString("utf8") || "{}");
+          L.remove(String(b.id || ""));
+          return send(res, 200, { ok: true });
+        }
+        if (parts[1] === "data" && m === "GET") {
+          const app = L.find(String(parts[2] || ""));
+          if (!app) return send(res, 404, { error: "App not found" });
+          const dataDir = path.join(vaultDir(), ".pandora", "xdc-data", app.appKey);
+          try {
+            return send(res, 200, JSON.parse(fs.readFileSync(path.join(dataDir, "data.json"), "utf8")));
+          } catch {
+            return send(res, 200, {});
           }
+        }
+        if (parts[1] === "data" && m === "POST") {
+          const app = L.find(String(parts[2] || ""));
+          if (!app) return send(res, 404, { error: "App not found" });
+          const dataDir = path.join(vaultDir(), ".pandora", "xdc-data", app.appKey);
+          fs.mkdirSync(dataDir, { recursive: true });
+          fs.writeFileSync(path.join(dataDir, "data.json"), JSON.stringify(JSON.parse((await readBody(req, 50_000_000)).toString("utf8") || "{}"), null, 2));
+          return send(res, 200, { ok: true });
         }
       } catch (e) {
-        return send(res, e?.status || (e?.code === "ENOENT" ? 404 : 400), { error: e?.code === "ENOENT" ? "That isn't there (is the network place reachable?)." : e instanceof Error ? e.message : String(e) });
-      }
-    }
-    if (parts[0] === "files") {
-      const F = files();
-      const local = onThisPc(req);
-      try {
-        const asked = url.searchParams.get("path");
-        if (m === "GET" && isDevicePath(asked)) {
-          // shared by another device: listed and sent by that device's page
-          if (parts[1] === "list") return send(res, 200, await devices.list(asked));
-          if (parts[1] === "raw") return devices.raw(asked, res, Boolean(url.searchParams.get("download")), req.headers.range);
-          if (parts[1] === "stat") {
-            const up = asked.includes("/") ? asked.slice(0, asked.lastIndexOf("/")) : asked;
-            if (up === asked) return send(res, 200, { path: asked, name: asked, dir: true, size: 0, mtime: 0, ctime: 0, ext: "" });
-            const hit = (await devices.list(up)).entries.find((e) => e.path === asked);
-            if (!hit) return send(res, 404, { error: "That isn't there any more." });
-            return send(res, 200, { ...hit, ctime: hit.mtime });
-          }
-        }
-        if (m === "POST" && isDevicePath(asked)) return send(res, 403, { error: "Files shared from another device can be opened and downloaded here, not changed." });
-        if (m === "GET") {
-          if (parts[1] === "places") return send(res, 200, { ...F.overview(local), network: await F.network(local), devices: devices.places() });
-          if (parts[1] === "list") return send(res, 200, await F.listAny(url.searchParams.get("path"), local));
-          if (parts[1] === "stat") return send(res, 200, F.stat(url.searchParams.get("path"), local));
-          if (parts[1] === "trash") return send(res, 200, F.trashList());
-          if (parts[1] === "raw") {
-            const file = F.allowed(url.searchParams.get("path"), local);
-            // "download": saved on the device asking, under its own name
-            if (url.searchParams.get("download")) res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(file))}`);
-            return serveRange(req, res, file);
-          }
-        }
-        if (m === "POST" && parts[1] === "upload")
-          return send(res, 200, { path: F.upload(url.searchParams.get("dir"), decodeURIComponent(String(req.headers["x-filename"] || "file")), await readBody(req, 4_000_000_000), local) });
-        if (m === "POST") {
-          const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
-          if ([b.path, b.into].some(isDevicePath)) return send(res, 403, { error: "Files shared from another device can be opened and downloaded here, not changed." });
-          if (parts[1] === "mkdir") return send(res, 200, { path: F.mkdir(b.path, b.name, local) });
-          if (parts[1] === "unzip") return send(res, 200, F.unzip(b.path, local));
-          if (parts[1] === "move") return send(res, 200, { path: F.move(b.path, { name: b.name, into: b.into }, local) });
-          if (parts[1] === "trash") return send(res, 200, F.trash(b.path, local));
-          if (parts[1] === "restore") return send(res, 200, { path: F.restore(String(b.id), local) });
-          if (parts[1] === "reveal-device") return send(res, 200, (F.revealOnDevice(b.path, local), { ok: true }));
-          if (parts[1] === "whole-pc") return send(res, 200, { ...F.setWhole(b.on, local), devices: devices.places() });
-          if (parts[1] === "share") return send(res, 200, withDevices(F.share({ path: b.path, on: Boolean(b.on), wholePc: typeof b.wholePc === "boolean" ? b.wholePc : undefined }, local)));
-          // a Mini App (.xdc) from anywhere Explorer reaches, into Games & Apps
-          if (parts[1] === "import-xdc") {
-            const file = F.allowed(b.path, local);
-            const r = library().importAny(fs.readFileSync(file), path.basename(file));
-            return send(res, 200, { added: r.added.length, duplicates: r.duplicates, id: r.found[0]?.id ?? null, errors: r.errors });
-          }
-        }
-      } catch (e) {
-        return send(res, e?.status || (e?.code === "ENOENT" ? 404 : 400), { error: e?.code === "ENOENT" ? "That isn't there any more." : e instanceof Error ? e.message : String(e) });
-      }
-    }
-    // the Mac that last ran the setup (curl …/mac | bash), for filling in engine addresses
-    if (parts[0] === "mac" && m === "GET") {
-      try {
-        return send(res, 200, JSON.parse(fs.readFileSync(path.join(dataDir, "mac.json"), "utf8")));
-      } catch {
-        return send(res, 200, {});
-      }
-    }
-    // the Browser's key for /browse (only the desktop page can ask for it)
-    if (parts[0] === "browse" && parts[1] === "key" && m === "GET") return send(res, 200, { key: browser.key });
-    if (parts[0] === "folders" && m === "GET") {
-      try {
-        return send(res, 200, await listFolders(url.searchParams.get("path") || "", path.join(dataDir, "network-places.json"), { newPlaces: onThisPc(req) }));
-      } catch (e) {
-        return send(res, 400, { error: e instanceof Error ? e.message.replace(/^\w+: /, "") : String(e) });
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
       }
     }
     if (parts[0] === "music") {
+      // the music library (music.mjs): folders, listing, covers, and the current queue
       const M = music();
-      if (parts[1] === "library" && m === "GET") return send(res, 200, M.list());
-      // the libraries other devices are sharing right now (their files stay on them; played through /api/files/raw)
-      if (parts[1] === "shared" && m === "GET") return send(res, 200, { libraries: devices.libraries() });
-      if (parts[1] === "scan" && m === "POST") {
-        const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
-        const folders = Array.isArray(b.folders) ? b.folders.map(String) : M.folders();
-        // a network place new to this computer is reached from the computer itself first (see listFolders)
-        if (!onThisPc(req)) for (const f of folders) if (!(await knownPlace(f, path.join(dataDir, "network-places.json")))) return send(res, 403, { error: `${f} is a network place this computer hasn't opened yet: open it on the desktop's own computer first.` });
-        return send(res, 200, await M.scan(folders));
-      }
-      if (parts[1] === "file") return M.serve(req, res, String(url.searchParams.get("id") || ""));
-      if (parts[1] === "cover") return void (await M.cover(res, String(url.searchParams.get("id") || ""), req));
-      if (parts[1] === "info") {
-        const i = await M.info(String(url.searchParams.get("id") || ""));
-        return i ? send(res, 200, i) : send(res, 404, { error: "That song isn't in the library." });
-      }
-      if (parts[1] === "radio") return void (await M.radio(req, res, String(url.searchParams.get("url") || "")));
-      if (parts[1] === "rename" && m === "POST") {
-        try {
-          const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
-          return send(res, 200, M.rename(String(b.id || ""), b.name, { local: onThisPc(req) }));
-        } catch (e) {
-          return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+      try {
+        if (parts[1] === "folders" && m === "GET") return send(res, 200, { folders: M.folders(), places: knownPlace() });
+        if (parts[1] === "set-folders" && m === "POST") {
+          if (!onThisPc(req)) return send(res, 403, { error: "Music folders are set on the desktop's own computer." });
+          const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
+          return send(res, 200, M.setFolders(b.folders));
         }
-      }
-      if (parts[1] === "engine-link" && m === "POST") {
-        try {
-          return send(res, 200, { id: engineStream.link(JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}")) });
-        } catch (e) {
-          return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+        if (parts[1] === "list" && m === "GET") return send(res, 200, M.list());
+        if (parts[1] === "cover" && m === "GET") {
+          const cover = M.cover(String(parts[2] || ""));
+          if (!cover) return send(res, 404, { error: "No cover" });
+          return serveFile(res, cover);
         }
-      }
-      if (parts[1] === "engine-song" && parts[2]) return void (await engineStream.serve(req, res, String(parts[2])));
-      if (parts[1] === "fetch-song") {
-        try {
-          if (m === "POST") return send(res, 200, { id: songFetch().start(JSON.parse((await readBody(req, 2_000_000)).toString("utf8") || "{}")) });
-          if (m === "DELETE") return (songFetch().stop(String(parts[2] || "")), send(res, 200, { ok: true }));
-          const st = songFetch().status(String(parts[2] || ""));
-          return st ? send(res, 200, st) : send(res, 404, { error: "No such fetch (the desktop's server may have restarted)." });
-        } catch (e) {
-          return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+        if (parts[1] === "file" && m === "GET") {
+          const file = M.file(String(parts[2] || ""));
+          if (!file) return send(res, 404, { error: "Not found" });
+          return serveRange(req, res, file);
         }
-      }
-      if (parts[1] === "upload" && m === "POST") {
-        try {
-          const name = M.upload(decodeURIComponent(String(req.headers["x-filename"] || "track")), await readBody(req, 500_000_000));
-          return send(res, 200, { ok: true, name });
-        } catch (e) {
-          return send(res, 400, { error: e instanceof Error ? e.message : String(e) });
+        if (parts[1] === "song-fetch" && m === "POST") {
+          const b = JSON.parse((await readBody(req, 50_000)).toString("utf8") || "{}");
+          return send(res, 200, await songFetch().fetch(String(b.engine || ""), String(b.id || ""), b.options ?? {}));
         }
+        if (parts[1] === "stream" && m === "POST") {
+          const b = JSON.parse((await readBody(req, 50_000)).toString("utf8") || "{}");
+          return send(res, 200, engineStream.start(String(b.engine || ""), String(b.id || ""), b));
+        }
+        if (parts[1] === "stream" && m === "GET") {
+          const id = String(url.searchParams.get("id") || "");
+          return engineStream.serve(req, res, id);
+        }
+        return send(res, 404, { error: "Not found" });
+      } catch (e) {
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
       }
     }
-    if (parts[0] === "relay" && m === "POST") return relay(req, res, JSON.parse((await readBody(req, 60_000_000)).toString("utf8") || "{}"));
-    if (parts[0] === "info") return send(res, 200, { dataDir, xdcDir: L.root, fromEnv: Boolean(process.env.PDD_DATA) });
-    if (parts[0] === "luanti") {
+    if (parts[0] === "files") {
+      // the desktop's own files, when the person has allowed it (see files.mjs)
+      const F = files();
       try {
-        if (parts[1] === "public" && m === "GET") return send(res, 200, { servers: await luanti.publicList() });
-        // the in-browser client: whether it's here, and the newest build (asked only when wanted)
-        if (parts[1] === "web" && m === "GET") return send(res, 200, { ...luantiWeb.status(), latest: url.searchParams.get("check") ? await luantiWeb.latest().catch(() => null) : undefined, canInstall: onThisPc(req) });
-        if (parts[1] === "web" && m === "POST") {
-          if (!onThisPc(req)) return send(res, 403, { error: "It's set up on the desktop's own computer." });
-          return send(res, 200, await luantiWeb.install());
+        if (m === "GET") {
+          const q = String(url.searchParams.get("q") || "").toLowerCase();
+          return send(res, 200, F.list(q, { device: url.searchParams.get("device") }));
         }
-        if (!parts[1] && m === "GET") return send(res, 200, { ...luanti.status(), canLaunch: onThisPc(req) });
-        if (!parts[1] && m === "POST") {
-          const b = JSON.parse((await readBody(req, 20_000)).toString("utf8") || "{}");
-          // the server list is the family's (any device); the program, and starting it, belong to this computer
-          if (b.op === "save-server") return send(res, 200, luanti.saveServer(b));
-          if (b.op === "remove-server") return send(res, 200, luanti.removeServer(String(b.id || "")));
-          if (!onThisPc(req)) return send(res, 403, { error: "Luanti is started on the desktop's own computer. On this device, use the Luanti app with the server's address." });
-          if (b.op === "set-program") return send(res, 200, luanti.setProgram(String(b.path || "")));
-          if (b.op === "launch") return send(res, 200, luanti.launch(b));
-          return send(res, 400, { error: "Which change?" });
+        if (m === "POST") {
+          const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
+          if (parts[1] === "open") return send(res, 200, F.open(b.path));
+          if (parts[1] === "set-whole-pc") {
+            if (!onThisPc(req)) return send(res, 403, { error: "Whole-computer sharing is set on the desktop's own computer." });
+            F.setWholePc(Boolean(b.on));
+            return send(res, 200, { wholeComputer: F.getWholePc() });
+          }
+          if (parts[1] === "set-sharing") {
+            if (!onThisPc(req)) return send(res, 403, { error: "Sharing is set on the desktop's own computer." });
+            F.setSharing(b.sharing);
+            return send(res, 200, { sharing: F.getSharing() });
+          }
         }
       } catch (e) {
         return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
       }
     }
-    // the shared desk: the desktop's own pages and devices over Tailscale's https or the LAN (as the desktop itself is);
-    // the first copy is made from the desktop's own computer
-    // the local network's devices: seen and looked for only on this computer (a map of the household isn't for every page)
-    if (parts[0] === "lan") {
+    if (parts[0] === "library") {
+      // linked folders (library.mjs): add, list, remove, and read files through them
       try {
-        if (!onThisPc(req)) return send(res, 403, { error: "The network watch is on the desktop's own computer." });
-        if (m === "GET" && !parts[1]) return send(res, 200, lanWatch.list());
-        if (m === "POST" && parts[1] === "scan") return send(res, 200, await lanWatch.scan());
-        if (m === "POST" && parts[1] === "label") {
-          const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
-          return send(res, 200, lanWatch.label(String(b.mac || ""), b.label));
+        if (m === "GET") {
+          if (parts[1] === "list") return send(res, 200, linked.list());
+          if (parts[1] === "file") {
+            const file = linked.file(String(parts[2] || ""), parts.slice(3).map(decodeURIComponent).join("/"));
+            if (!file) return send(res, 404, { error: "Not found" });
+            return serveFile(res, file);
+          }
         }
-        return send(res, 404, { error: "Not found" });
-      } catch (e) {
-        return send(res, e.status || 500, { error: e.message });
-      }
-    }
-    if (parts[0] === "desk") {
-      // (the shared desk carries the household's Keys)
-      if (!fromOwnPage(req)) return send(res, 403, { error: PAGES_ONLY });
-      try {
-        if (m === "GET" && !parts[1]) return send(res, 200, { ...desk.get(Number(url.searchParams.get("since")) || 0), here: onThisPc(req) });
-        // one section as it is now (a device going into a room)
-        if (m === "GET" && parts[1] === "section") {
-          const s = desk.get(0).sections[String(url.searchParams.get("name") || "")];
-          return send(res, 200, { rev: s?.rev ?? 0, value: s?.value ?? null });
-        }
-        if (m === "GET" && parts[1] === "legacy") return send(res, 200, parts[2] ? JSON.parse(desk.legacyRead(decodeURIComponent(parts[2]))) : { kept: desk.legacyList() });
         if (m === "POST") {
-          const b = JSON.parse((await readBody(req, 200_000_000)).toString("utf8") || "{}");
-          if (parts[1] === "save") return send(res, 200, desk.put(b, { mayFound: onThisPc(req) }));
-          if (parts[1] === "legacy") return send(res, 200, desk.keepLegacy(String(b.device || ""), String(b.blob || "")));
-        }
-        return send(res, 404, { error: "Not found" });
-      } catch (e) {
-        return send(res, e.status && e.status < 600 ? e.status : 500, { error: e.message });
-      }
-    }
-    // the heart (heart.mjs): which page does the background work, and the keeper's copy of the desktop
-    if (parts[0] === "heart") {
-      try {
-        const here = onThisPc(req);
-        if (parts[1] === "beat" && m === "POST") {
-          const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
-          return send(res, 200, heart.beat(String(b.page || ""), { onPc: here, keeper: Boolean(b.keeper), port: req.socket.localPort }));
-        }
-        if (parts[1] === "leave" && m === "POST") {
-          const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
-          heart.leave(String(b.page || ""));
-          return send(res, 200, { ok: true });
-        }
-        if (parts[1] === "config" && m === "GET") return send(res, 200, { ...heart.status(), canChange: here });
-        if (!here) return send(res, 403, { error: "Keeping them running is set up on the desktop's own computer." });
-        if (parts[1] === "config" && m === "POST") return send(res, 200, heart.setConfig(JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}")));
-        // (the heart's copy of the desktop holds the keys)
-        if (parts[1] === "state" && !fromOwnPage(req)) return send(res, 403, { error: PAGES_ONLY });
-        if (parts[1] === "state" && m === "GET") return send(res, 200, await heart.get({ forKeeper: url.searchParams.get("keeper") === "1", since: Number(url.searchParams.get("since")) || 0 }));
-        // PUT from the page, POST from sendBeacon as the page closes
-        if (parts[1] === "state" && (m === "PUT" || m === "POST")) {
-          const b = JSON.parse((await readBody(req, 200_000_000)).toString("utf8") || "{}");
-          return send(res, 200, heart.put(String(b.page || ""), String(b.blob ?? ""), Boolean(b.final)));
-        }
-        return send(res, 404, { error: "Not found" });
-      } catch (e) {
-        return send(res, e.status || 500, { error: e.message });
-      }
-    }
-    // heartbeats: each character's beat goes to the first device that asks for it (several can be open at once)
-    if (parts[0] === "heartbeat" && parts[1] === "claim" && m === "POST") {
-      const b = JSON.parse((await readBody(req, 4000)).toString("utf8") || "{}");
-      const key = `${String(b.account || "").toLowerCase()}|${String(b.id || "")}`;
-      const every = Math.max(60_000, Number(b.every) || 30 * 60_000);
-      const was = beats.get(key) ?? 0;
-      if (Date.now() - was < every - 30_000) return send(res, 200, { ok: false });
-      beats.set(key, Date.now());
-      return send(res, 200, { ok: true });
-    }
-    if (parts[0] === "memory") {
-      if (m === "GET") return send(res, 200, { ...memory.status(), canChange: onThisPc(req) });
-      if (m === "POST") {
-        const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
-        // cleaning up is harmless from any device; changing what the computer does on its own is for the computer itself
-        if (b.op === "clean") return send(res, 200, { freed: memory.clean(), ...memory.status() });
-        if (!onThisPc(req)) return send(res, 403, { error: "These are set on the desktop's own computer." });
-        if (b.op === "sleep-engine") return send(res, 200, { slept: await memory.sleepEngine(), ...memory.status() });
-        if (b.op === "set") return send(res, 200, memory.set(b));
-      }
-    }
-    if (parts[0] === "storage" && m === "POST") {
-      // Move (or just point) the library to another folder, e.g. a roomier drive.
-      const body = JSON.parse((await readBody(req)).toString("utf8") || "{}");
-      const target = path.resolve(String(body.dataDir || ""));
-      if (!body.dataDir || !path.isAbsolute(String(body.dataDir))) return send(res, 400, { error: "Give a full folder path, like D:\\PandoraData or /home/me/pandora-data." });
-      if (target === dataDir) return send(res, 200, { dataDir });
-      try {
-        fs.mkdirSync(target, { recursive: true });
-        if (body.move) {
-          for (const sub of ["xdc", "xdc-state"]) {
-            const from = path.join(dataDir, sub);
-            if (fs.existsSync(from)) fs.cpSync(from, path.join(target, sub), { recursive: true, force: false, errorOnExist: false });
+          const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
+          if (parts[1] === "add") {
+            if (!onThisPc(req)) return send(res, 403, { error: "Linked folders are added on the desktop's own computer." });
+            return send(res, 200, linked.add(String(b.name || ""), String(b.path || "")));
+          }
+          if (parts[1] === "remove") {
+            if (!onThisPc(req)) return send(res, 403, { error: "Linked folders are removed on the desktop's own computer." });
+            return send(res, 200, linked.remove(String(b.id || "")));
           }
         }
       } catch (e) {
-        return send(res, 400, { error: `Couldn't use that folder: ${e instanceof Error ? e.message : e}` });
-      }
-      const old = dataDir;
-      dataDir = target;
-      lib = undefined;
-      writeConfig({ dataDir });
-      return send(res, 200, { dataDir, previous: old, moved: Boolean(body.move) });
-    }
-    if (parts[0] === "xdc") {
-      const [, id, what] = parts;
-      if (!id && m === "GET") return send(res, 200, L.list());
-      // Newer releases where the apps are made (GitHub, Codeberg), checked only when asked
-      if (id === "updates" && m === "POST") return send(res, 200, await checkUpdates(L.list()));
-      if (id === "fetch-update" && m === "POST") {
-        const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
-        try {
-          const f = await download(String(b.url || ""));
-          return send(res, 200, L.importAny(f.bytes, f.name));
-        } catch (e) {
-          return send(res, 400, { error: e instanceof Error ? e.message : String(e) });
-        }
-      }
-      // a web game (its folder or .zip or page, sent or on the desktop) made into a Mini App, opened as a draft to edit
-      if (id === "import-web" && m === "POST") {
-        try {
-          let got;
-          let web = true;
-          if (String(req.headers["content-type"] || "").startsWith("application/json")) {
-            const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
-            // one of the built-in games (Games' own folder), or a path Explorer reaches
-            const games = path.join(publicDir, "games");
-            const p = b.game ? path.resolve(games, String(b.game)) : files().allowed(String(b.path || ""), onThisPc(req));
-            if (b.game && !p.startsWith(games + path.sep)) return send(res, 403, { error: "That isn't one of the games." });
-            web = b.web !== false;
-            got = fs.statSync(p).isDirectory() ? WG.readFolder(p) : WG.fromUpload(fs.readFileSync(p), path.basename(p));
-          } else {
-            web = req.headers["x-web"] !== "0";
-            got = WG.fromUpload(await readBody(req), decodeURIComponent(String(req.headers["x-filename"] || "game.zip")));
-          }
-          const made = WG.makeMiniApp(got.files, got.stem);
-          const fetched = web ? await WG.fetchLinked(made.files) : { kept: 0, bytes: 0 };
-          const still = WG.remoteRefs(made.files);
-          const r = L.importXdc(Buffer.from(zipSync(made.files, { level: 6 })), `${made.name}.xdc`);
-          const draft = L.fork(r.pkg.id, "0.1.0-draft");
-          return send(res, 200, { pkg: draft, base: r.pkg.id, name: made.name, done: made.done, fetched, still });
-        } catch (e) {
-          return send(res, e?.status || 400, { error: e instanceof Error ? e.message : String(e) });
-        }
-      }
-      if (id === "import" && m === "POST") {
-        const name = decodeURIComponent(String(req.headers["x-filename"] || "upload.xdc"));
-        const bytes = await readBody(req);
-        try {
-          return send(res, 200, L.importAny(bytes, name));
-        } catch (e) {
-          return send(res, 400, { error: e.message });
-        }
-      }
-      const pkg = L.get(id);
-      if (!pkg) return send(res, 404, { error: "No such app version." });
-      if (!what) {
-        if (m === "PATCH") return send(res, 200, L.update(id, JSON.parse((await readBody(req)).toString("utf8") || "{}")));
-        if (m === "DELETE") return send(res, 200, { ok: L.remove(id) });
-        return send(res, 200, pkg);
-      }
-      if (what === "fork" && m === "POST") {
-        const body = JSON.parse((await readBody(req)).toString("utf8") || "{}");
-        return send(res, 200, L.fork(id, String(body.version || "")));
-      }
-      if (what === "export") {
-        const zip = L.exportZip(id);
-        res.setHeader("Content-Disposition", `attachment; filename="${(pkg.appKey || "app") + (pkg.version ? `-${pkg.version.replace(/[^\w.-]+/g, "_")}` : "")}.xdc"`);
-        return send(res, 200, zip, "application/zip");
-      }
-      if (what === "icon") return pkg.icon ? serveFile(res, L.fileOf(id, pkg.icon)) : send(res, 404, "");
-      if (what === "files") return send(res, 200, L.listFiles(id));
-      if (what === "file") {
-        const rel = url.searchParams.get("path") || "";
-        const file = L.fileOf(id, rel);
-        if (!file || !rel) return send(res, 400, { error: "Bad path." });
-        if (m === "GET") return serveFile(res, file);
-        if (m === "PUT") {
-          fs.mkdirSync(path.dirname(file), { recursive: true });
-          fs.writeFileSync(file, await readBody(req, 50_000_000));
-          return send(res, 200, { ok: true });
-        }
-        if (m === "DELETE") {
-          fs.rmSync(file, { force: true });
-          return send(res, 200, { ok: true });
-        }
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
       }
     }
-    if (parts[0] === "ssh" && parts[1] && m === "POST") {
-      const args = JSON.parse((await readBody(req, 2_000_000)).toString("utf8") || "{}");
+    if (parts[0] === "upstreams") {
+      // check for and download SEASIDE updates (upstreams.mjs)
       try {
-        return send(res, 200, await sshOp(parts[1], args));
+        if (parts[1] === "check" && m === "GET") return send(res, 200, await checkUpdates());
+        if (parts[1] === "download" && m === "POST") {
+          if (!onThisPc(req)) return send(res, 403, { error: "Updates are downloaded on the desktop's own computer." });
+          const b = JSON.parse((await readBody(req, 50_000)).toString("utf8") || "{}");
+          return send(res, 200, await download(String(b.id || "")));
+        }
       } catch (e) {
-        return send(res, 200, { error: e instanceof Error ? e.message : String(e) });
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    if (parts[0] === "relay") {
+      // the paired-Classic relay (relay.mjs): a page opened in Classic asks this desktop to proxy a request for it
+      try {
+        return send(res, 200, await relay({ req, res, url, notTheDesktop: notTheDesktop(req), pairedCors: pairedCors(req) }));
+      } catch (e) {
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
       }
     }
     if (parts[0] === "inbound") {
-      if (parts[1] === "config" && m === "POST") return send(res, 200, await inbound.configure(JSON.parse((await readBody(req)).toString("utf8") || "{}")));
-      if (parts[1] === "status") return send(res, 200, inbound.status());
-      if (parts[1] === "next") return send(res, 200, (await inbound.next()) ?? { idle: true });
-      if (parts[1] === "reply" && m === "POST") {
-        const b = JSON.parse((await readBody(req, 5_000_000)).toString("utf8") || "{}");
-        return send(res, 200, { ok: inbound.reply(String(b.id), Number(b.status) || 200, b.body ?? {}) });
+      // inbound messages from other servers: pads linking, game invites, Vector mini-apps, and so on (see inbound.mjs)
+      try {
+        return send(res, 200, await inbound({ req, res, url, peers, padsLink, gameLinks, library }));
+      } catch (e) {
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
       }
     }
-    if (parts[0] === "vault") {
-      const rel = url.searchParams.get("path") || "";
-      if (parts[1] === "file") {
-        const file = vaultFile(rel);
-        if (!file || !rel) return send(res, 400, { error: "Bad path." });
-        if (m === "GET") return serveFile(res, file);
-        if (m === "PUT") {
-          fs.mkdirSync(path.dirname(file), { recursive: true });
-          fs.writeFileSync(file, await readBody(req, 200_000_000));
-          return send(res, 200, { ok: true, path: rel });
-        }
-        if (m === "DELETE") {
-          fs.rmSync(file, { force: true });
-          return send(res, 200, { ok: true });
-        }
-      }
-      // Notes: everything in the vault (but the desktop's own .pandora, the trash and tool folders).
-      const skip = (name) => name === ".pandora" || name === ".trash" || name === "node_modules" || name === ".git";
-      const walk = (dir, rel, out, depth = 0) => {
-        if (depth > 24 || !fs.existsSync(dir)) return out;
-        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-          if (skip(e.name)) continue;
-          const r = rel ? `${rel}/${e.name}` : e.name;
-          const full = path.join(dir, e.name);
-          if (e.isDirectory()) {
-            out.push({ path: r, dir: true, size: 0, mtime: 0 });
-            walk(full, r, out, depth + 1);
-          } else {
-            const st = fs.statSync(full);
-            out.push({ path: r, dir: false, size: st.size, mtime: st.mtimeMs });
-          }
-        }
-        return out;
-      };
-      if (parts[1] === "tree") return send(res, 200, walk(vaultDir(), "", []));
-      if (parts[1] === "notes") {
-        const out = {};
-        for (const f of walk(vaultDir(), "", [])) if (!f.dir && /\.(md|markdown)$/i.test(f.path) && f.size < 4_000_000) out[f.path] = fs.readFileSync(vaultFile(f.path), "utf8");
-        return send(res, 200, out);
-      }
-      if (m === "POST" && (parts[1] === "move" || parts[1] === "mkdir" || parts[1] === "trash")) {
-        const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
-        if (parts[1] === "mkdir") {
-          const dir = vaultFile(b.path);
-          if (!dir || !b.path) return send(res, 400, { error: "Bad path." });
-          fs.mkdirSync(dir, { recursive: true });
-          return send(res, 200, { ok: true });
-        }
-        const from = vaultFile(b.from);
-        if (!from || !b.from || !fs.existsSync(from)) return send(res, 404, { error: "Nothing at that path." });
-        // Deleting moves to .trash, so nothing a person or a character deletes is gone for good.
-        const toRel = parts[1] === "trash" ? `.trash/${Date.now().toString(36)}-${String(b.from).replace(/[\\/]+/g, "~")}` : b.to;
-        const to = vaultFile(toRel);
-        if (!to || !toRel) return send(res, 400, { error: "Bad path." });
-        if (fs.existsSync(to) && path.resolve(to).toLowerCase() !== path.resolve(from).toLowerCase()) return send(res, 409, { error: "Something already has that name." });
-        fs.mkdirSync(path.dirname(to), { recursive: true });
-        fs.renameSync(from, to);
-        return send(res, 200, { ok: true, path: toRel });
-      }
-      if (parts[1] === "rmdir" && m === "POST") {
-        const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
-        const dir = vaultFile(b.path);
-        if (!dir || !b.path || !fs.existsSync(dir)) return send(res, 404, { error: "No such folder." });
-        if (fs.readdirSync(dir).length) return send(res, 409, { error: "That folder isn't empty." });
-        fs.rmdirSync(dir);
-        return send(res, 200, { ok: true });
-      }
-      if (parts[1] === "list") {
-        const dir = vaultFile(rel || ".") ?? vaultDir();
-        if (!fs.existsSync(dir)) return send(res, 200, []);
-        return send(res, 200, fs.readdirSync(dir, { withFileTypes: true }).map((e) => ({ name: e.name, dir: e.isDirectory(), size: e.isFile() ? fs.statSync(path.join(dir, e.name)).size : 0 })));
-      }
-    }
-    // games shared with linked SEASIDEs: the links, offering one, and answering an offer (see gameLinks.mjs)
     if (parts[0] === "game-links") {
       try {
-        if (m === "GET") return send(res, 200, { links: gameLinks.list(), servers: peers.list() });
-        const b = JSON.parse((await readBody(req, 10_000)).toString("utf8") || "{}");
-        if (b.op === "offer") return send(res, 200, await gameLinks.offer(b));
-        if (b.op === "accept") return send(res, 200, await gameLinks.accept(String(b.id || "")));
-        if (b.op === "decline") return send(res, 200, await gameLinks.decline(String(b.id || "")));
-        if (b.op === "close") return send(res, 200, await gameLinks.close(String(b.id || "")));
-        return send(res, 400, { error: "Which change?" });
+        const b = m === "POST" ? JSON.parse((await readBody(req, 200_000)).toString("utf8") || "{}") : {};
+        if (parts[1] === "list" && m === "GET") return send(res, 200, gameLinks.list());
+        if (parts[1] === "create" && m === "POST") return send(res, 200, gameLinks.create(b));
+        if (parts[1] === "join" && m === "POST") return send(res, 200, await gameLinks.join(b));
+        if (parts[1] === "leave" && m === "POST") return send(res, 200, gameLinks.leave(b));
+        return send(res, 404, { error: "Not found" });
       } catch (e) {
-        return send(res, e?.status || 400, { error: e instanceof Error ? e.message : String(e) });
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
       }
     }
-    // a game's realtime channel, across this SEASIDE's devices and any linked SEASIDE playing it
-    if (parts[0] === "rt" && parts[1]) {
-      const scope = decodeURIComponent(parts[1]);
-      if (parts[2] === "events" && m === "GET") return void gameLinks.listen(scope, String(url.searchParams.get("page") || ""), res);
-      if (m === "POST") {
-        const b = JSON.parse((await readBody(req, 8_000_000)).toString("utf8") || "{}");
-        gameLinks.realtime(scope, String(b.page || ""), b.msgs);
-        return send(res, 200, { ok: true });
-      }
-    }
-    if (parts[0] === "state" && parts[1]) {
-      const scope = parts[1];
-      if (m === "GET") return send(res, 200, L.readUpdates(scope, Number(url.searchParams.get("since") || 0)));
-      if (m === "POST") {
-        const entry = JSON.parse((await readBody(req, 2_000_000)).toString("utf8"));
-        // a game linked from another SEASIDE: the move goes to its host, and comes back in the host's order
-        if (gameLinks.guestLink(scope)) {
-          try {
-            return send(res, 200, await gameLinks.sendAsGuest(scope, entry));
-          } catch (e) {
-            return send(res, 502, { error: e instanceof Error ? e.message : String(e) });
-          }
+    if (parts[0] === "luanti") {
+      // Luanti servers and the real client (luanti.mjs, luantiWeb.mjs, luantiRelay.mjs)
+      try {
+        if (parts[1] === "servers" && m === "GET") return send(res, 200, luanti.list());
+        if (parts[1] === "status" && m === "GET") return send(res, 200, luanti.status());
+        if (m === "POST") {
+          const b = JSON.parse((await readBody(req, 100_000)).toString("utf8") || "{}");
+          if (parts[1] === "add") return send(res, 200, luanti.add(b));
+          if (parts[1] === "remove") return send(res, 200, luanti.remove(String(b.id || "")));
+          if (parts[1] === "start") return send(res, 200, luanti.start(String(b.id || "")));
+          if (parts[1] === "stop") return send(res, 200, luanti.stop(String(b.id || "")));
+          if (parts[1] === "client") return send(res, 200, luantiWeb.client(String(b.id || ""), String(b.server || "")));
+          if (parts[1] === "relay") return send(res, 200, luantiRelay.connect(b));
         }
-        return send(res, 200, L.appendUpdate(scope, entry));
-      }
-      if (m === "DELETE") {
-        L.clearUpdates(scope);
-        return send(res, 200, { ok: true });
-      }
-    }
-    return send(res, 404, { error: "Unknown request." });
-  }
-
-  /** Apps and games, on the app origin only. */
-  function run(req, res, url) {
-    const parts = url.pathname.split("/").filter(Boolean);
-    if (parts[0] === "run") {
-      const [, id, ...rest] = parts;
-      const rel = decodeURIComponent(rest.join("/")) || "index.html";
-      const L = library();
-      const pkg = L.get(id);
-      if (!pkg) return send(res, 404, "Not found", "text/plain");
-      res.setHeader("Content-Security-Policy", XDC_CSP);
-      if (rel === "webxdc.js") return send(res, 200, "/* webxdc is provided by PDA SEASIDE */", MIME.js);
-      const q = url.searchParams;
-      const inject = rel.endsWith(".html") || rel.endsWith(".htm")
-        ? webxdcScript({ scope: q.get("scope") || pkg.appKey, addr: q.get("addr") || "you", name: q.get("name") || "You", lan: lan(), app: pkg.appKey })
-        : "";
-      return serveFile(res, L.fileOf(id, rel), inject);
-    }
-    // a game's adapter for characters' seats (public/game-adapters/<app>.js): served from the apps' own address
-    if (parts[0] === "game-adapters" && parts[1]) {
-      const file = path.resolve(publicDir, "game-adapters", path.basename(decodeURIComponent(parts[1])));
-      if (!file.endsWith(".js") || !fs.existsSync(file)) return send(res, 404, "", "text/plain");
-      return serveFile(res, file);
-    }
-    if (parts[0] === "games") {
-      const rel = decodeURIComponent(parts.join("/"));
-      const file = path.resolve(publicDir, rel);
-      if (!file.startsWith(path.join(publicDir, "games"))) return send(res, 403, "", "text/plain");
-      return serveFile(res, file, /\.html?$/i.test(file) ? helperScript() : "");
-    }
-    return null;
-  }
-
-  /**
-   * True when another website (or another local page) sent the request. Browsers mark every request
-   * with where it came from; only the desktop's own page may use /api, so a site open in another tab
-   * can't move files or start requests through it.
-   */
-  function fromElsewhere(req) {
-    const site = String(req.headers["sec-fetch-site"] || "");
-    if (site && site !== "same-origin" && site !== "none") return true;
-    const origin = req.headers.origin;
-    if (!origin) return false;
-    try {
-      return new URL(origin).host !== String(req.headers.host || "");
-    } catch {
-      return true;
-    }
-  }
-
-  /** The full browser's pictures as binary (wsframes.mjs): the desktop's own page only, as with /api. Other
-   *  upgrades (Vite's own live reload) are left alone. */
-  function pictureSocket(req, socket) {
-    const where = new URL(req.url || "/", "http://x").pathname;
-    // Luanti in the browser: its game traffic, name lookups and web fetches, relayed (luantiRelay.mjs)
-    if (where === "/api/luanti/relay") {
-      if (fromElsewhere(req)) return void socket.destroy();
-      const conn = openDuplex(req, socket);
-      return void (conn ? luantiRelay.attach(conn) : socket.destroy());
-    }
-    // PADS's live wire: the desktop's own page only, as with /api
-    if (where === "/api/pads/ws") {
-      if (fromElsewhere(req)) return void socket.destroy();
-      const q = new URL(req.url || "/", "http://x").searchParams;
-      const conn = openDuplex(req, socket);
-      return void (conn ? padsWire.attach(conn, { account: q.get("account") || "", device: q.get("device") || "" }) : socket.destroy());
-    }
-    // a real terminal's window: same rules as its routes
-    if (where === "/api/terminal/ws") {
-      if (fromElsewhere(req) || (!onThisPc(req) && !viaTailnet(req))) return void socket.destroy();
-      const conn = openDuplex(req, socket);
-      return void (conn ? terminals.attach(new URL(req.url || "/", "http://x").searchParams.get("id") || "", conn) : socket.destroy());
-    }
-    if (where !== "/api/engine/ws") return;
-    if (fromElsewhere(req)) return void socket.destroy();
-    deskPorts.add(socket.localPort);
-    if (acceptSocket(req, socket)) engine.attachSocket(socket);
-    else socket.destroy();
-  }
-
-  async function handle(req, res, next) {
-    const url = new URL(req.url || "/", "http://x");
-    try {
-      // the Mac's engines in one line: curl -sL <this address>/mac | bash (scripts from this project, nothing else)
-      const MAC = { "/mac": "mac-setup.sh", "/mac/mlx-music-bridge.py": "mlx-music-bridge.py", "/mac/mac-autostart.sh": "mac-autostart.sh" };
-      // the Mac setup sends its output here, so problems can be read on this computer (kept in the data folder)
-      if (url.pathname === "/mac/report" && req.method === "POST") {
-        const body = await readBody(req, 4_000_000);
-        const dir = path.join(dataDir, "mac-reports");
-        fs.mkdirSync(dir, { recursive: true });
-        const name = `${new Date().toISOString().replace(/[:.]/g, "-")}-${String(url.searchParams.get("name") || "report").replace(/[^\w-]+/g, "_").slice(0, 40)}.txt`;
-        fs.writeFileSync(path.join(dir, name), body);
-        // where the Mac is, so its engines can be added without typing the address
-        const from = String(req.socket.remoteAddress || "").replace(/^::ffff:/, "");
-        if (from && !/^(127\.|::1$)/.test(from)) fs.writeFileSync(path.join(dataDir, "mac.json"), JSON.stringify({ address: from, at: Date.now(), audioPort: 15666, musicPort: 11235 }));
-        return send(res, 200, `Sent to the desktop (${name}).\n`, "text/plain; charset=utf-8");
-      }
-      if (MAC[url.pathname] && req.method === "GET") {
-        // Unix line endings whatever this computer's copy has (bash on the Mac stops at a stray \r)
-        let text = fs.readFileSync(path.join(root, "scripts", MAC[url.pathname]), "utf8").replace(/\r\n/g, "\n");
-        if (url.pathname === "/mac") text = text.replace("__DESKTOP__", `${String(req.headers["x-forwarded-proto"] || "http").split(",")[0]}://${String(req.headers.host || "")}`);
-        return send(res, 200, text, "text/plain; charset=utf-8");
-      }
-      // a plain page with no scripts: can this device reach the desktop at all? (for phones that can't open it)
-      if (url.pathname === "/hello") {
-        const ua = String(req.headers["user-agent"] || "").replace(/</g, "&lt;");
-        const from = String(req.socket.remoteAddress || "").replace(/^::ffff:/, "");
-        return send(res, 200, `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><body style="font:17px system-ui;padding:24px;background:#0b0912;color:#eee"><h2>This device reaches PDA SEASIDE.</h2><p>If the desktop itself doesn't open here, it's the browser: update it, or try another.</p><p style="opacity:.7;font-size:14px">From ${from}<br>${ua}</p><p><a style="color:#b48cff" href="/">Open the desktop</a></p></body>`, "text/html; charset=utf-8");
-      }
-      // the hidden Vector host's bridge (this computer only, with its run's token; see vectorHost.mjs)
-      if (url.pathname === "/vh-bridge/next" || url.pathname === "/vh-bridge/reply") return void (await vectorHost().bridge(req, res, url, readBody));
-      // linked SEASIDE servers asking this one (with their token; joining with an invite code made here)
-      // Luanti in the browser: SEASIDE's play page and the build's own files, cross-origin isolated
-      if (url.pathname.startsWith("/luanti-web/")) return void luantiWeb.serve(req, res, url, send);
-      if (url.pathname.startsWith("/pads-peer/")) {
-        deskPorts.add(req.socket.localPort);
-        if (await gameLinks.handle(req, res, url, { readBody, send })) return;
-        if (await padsLink.handle(req, res, url, { readBody, send })) return;
-      }
-      // paired Classic pages (other origins, with their pairing token): hello, and the relay
-      if (url.pathname === "/paired/hello" || url.pathname === "/paired/relay") {
-        pairedCors(req, res);
-        if (req.method === "OPTIONS") return (res.statusCode = 204), void res.end();
-        deskPorts.add(req.socket.localPort);
-        const who = pairs.check(req);
-        if (!who) return send(res, 401, { error: "This page isn't paired with the desktop, or its pairing was removed. Pair it again from the desktop: Settings → Classic." });
-        if (url.pathname === "/paired/hello") return send(res, 200, { ok: true, desktop: "PDA SEASIDE", pairing: who.name });
-        if (req.method !== "POST") return send(res, 405, { error: "POST a request for the relay." });
-        return void (await relay(req, res, JSON.parse((await readBody(req, 60_000_000)).toString("utf8") || "{}"), notTheDesktop(req)));
-      }
-      // Vector's own interface, for its window in the desktop (on the desktop's address: it uses the API)
-      if (url.pathname.startsWith("/vector-app/") && (!isAppHost(req) || lan())) {
-        const rel = decodeURIComponent(url.pathname.slice("/vector-app/".length));
-        if (rel === "__pda/shim.js") return send(res, 200, fs.readFileSync(path.join(root, "vector-host", "shim.js"), "utf8"), "text/javascript; charset=utf-8");
-        const f = vectorHost().uiFile(rel);
-        if (!f) return send(res, 404, "Vector's interface isn't built here yet.", "text/plain");
-        if (f.file) return serveFile(res, f.file);
-        return send(res, 200, f.text, MIME[f.ext]);
-      }
-      if (url.pathname.startsWith("/api/")) {
-        if (isAppHost(req) && !lan()) return send(res, 403, { error: "Not available to apps." });
-        // (a character's link to a big file is clicked from Discord, Vector or anywhere: the ticket in it is the
-        // permission, for that one file, for a day, and fetching it changes nothing)
-        const ticketLink = req.method === "GET" && url.pathname.startsWith("/api/library/get/");
-        if (fromElsewhere(req) && !ticketLink) return send(res, 403, { error: "Only the desktop's own page can use this." });
-        return await api(req, res, url);
-      }
-      // AICord's sign-in sends the browser back here (a top-level visit from aicordapp.com, so not under /api;
-      // it's only accepted with the state this desktop made)
-      if (url.pathname === "/oauth/aicord/callback" && !isAppHost(req)) return send(res, 200, await aicordAuth.callback(url), "text/html; charset=utf-8");
-      // Classic pages, with the relay hook added as they're served (the files themselves stay as built)
-      if (/^\/classic\/[^/]+\.html$/.test(url.pathname) && !isAppHost(req)) {
-        const file = path.resolve(publicDir, url.pathname.slice(1));
-        if (file.startsWith(path.join(publicDir, "classic")) && fs.existsSync(file)) return serveFile(res, file, classicRelayScript());
-      }
-      // web pages for the Browser, on the apps' address (and in a sandboxed frame there)
-      // (when shared on the network there's no separate apps' address; the page's own sandbox policy still holds)
-      if (url.pathname === "/browse" && (isAppHost(req) || lan() || viaTailnet(req))) return void (await browser.serve(req, res, url));
-      // An app built to sit at the root of its own address (Vite's "/assets/…", as most Vector apps are) asks for root
-      // paths. Here every app shares one address under /run/<id>/, so those come from the app whose page asked (its
-      // Referer), and only ever from that app's own files; anything else on the apps' address stays as it was.
-      // the few things a few Mini Apps are made to fetch (appNet.mjs: the Learning Lab's courses), for those apps alone
-      if (isAppHost(req) && url.pathname === "/app-net/fetch" && req.method === "GET") {
-        const pkg = library().get(AN.askingPkg(req.headers.referer));
-        try {
-          const r = await AN.fetchFor(pkg?.appKey, String(url.searchParams.get("url") || ""));
-          return void send(res, r.status, r.text, "text/plain; charset=utf-8");
-        } catch (e) {
-          return void send(res, 502, e instanceof Error ? e.message : String(e), "text/plain; charset=utf-8");
+        if (parts[1] === "wasm" && m === "GET") {
+          const file = luantiWeb.asset(parts.slice(2).join("/"));
+          if (!file) return send(res, 404, { error: "Not found" });
+          return serveFile(res, file);
         }
+      } catch (e) {
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
       }
-      // an app's voice through SEASIDE's own voices (omargVoices.mjs), for the apps given a voice (the Learning Lab's
-      // Lilith): the line comes back as WAV; which voice is the app's setting in voices/app-voices.json
-      if (isAppHost(req) && url.pathname === "/app-voice/speak" && req.method === "POST") {
-        const pkg = library().get(AN.askingPkg(req.headers.referer));
-        const voiceFor = OV.appVoice(path.join(dataDir, "voices"), pkg?.appKey);
-        if (!voiceFor) return void send(res, 403, { error: "This app has no voice." });
-        voices ??= OV.createVoices(path.join(dataDir, "voices"));
-        try {
-          const b = JSON.parse((await readBody(req, 50_000)).toString("utf8") || "{}");
-          const audio = await voices.speak({ input: b.text, voice: voiceFor, speed: b.rate });
-          res.writeHead(200, { "Content-Type": "audio/wav", "Content-Length": audio.length });
-          return void res.end(audio);
-        } catch (e) {
-          return void send(res, e?.status || 500, { error: e instanceof Error ? e.message : String(e) });
-        }
-      }
-      // a game's adapter for characters' seats is SEASIDE's own, not the app's: served before an app's root paths
-      if (isAppHost(req) && url.pathname.startsWith("/game-adapters/")) {
-        if (run(req, res, url) !== null) return;
-      }
-      if (isAppHost(req) && !url.pathname.startsWith("/run/") && !url.pathname.startsWith("/games/") && !url.pathname.startsWith("/game-adapters/") && url.pathname !== "/browse") {
-        // the folder the asking page lives in: "/run/<id>/", or a built-in game's "/games/<set>/<slug>/"
-        let home = "";
-        try {
-          const from = new URL(String(req.headers.referer || "")).pathname;
-          const app = /^\/run\/([^/]+)\//.exec(from);
-          const game = /^\/games\/([^/]+)\/([^/]+)\//.exec(from);
-          home = app ? `/run/${app[1]}/` : game ? `/games/${game[1]}/${game[2]}/` : "";
-        } catch {
-          /* no page, or not an address */
-        }
-        if (home && run(req, res, new URL(home + url.pathname.slice(1) + url.search, url)) !== null) return;
-      }
-      if (url.pathname.startsWith("/run/") || (url.pathname.startsWith("/games/") && isAppHost(req))) {
-        if (isDeskHost(req) && !lan()) return send(res, 403, "Apps run on their own address.", "text/plain");
-        if (run(req, res, url) !== null) return;
-      }
-    } catch (e) {
-      return send(res, 500, { error: e instanceof Error ? e.message : String(e) });
     }
-    next();
+    if (parts[0] === "ssh") {
+      // one-off SSH operations from the desktop to another computer (ssh.mjs)
+      try {
+        if (!onThisPc(req) && !viaTailnet(req)) return send(res, 403, { error: "SSH is run from the desktop's own computer or over your tailnet." });
+        const b = JSON.parse((await readBody(req, 200_000)).toString("utf8") || "{}");
+        return send(res, 200, await sshOp(b));
+      } catch (e) {
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    if (parts[0] === "webgame") {
+      // shared state for webxdc and browser games (webgame.mjs)
+      try {
+        if (m === "GET") {
+          const state = WG.get(String(parts[1] || ""));
+          return send(res, 200, state ?? {});
+        }
+        if (m === "POST") {
+          const b = JSON.parse((await readBody(req, 200_000)).toString("utf8") || "{}");
+          return send(res, 200, WG.set(String(parts[1] || ""), b));
+        }
+      } catch (e) {
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    if (parts[0] === "app-net") {
+      // appNet: a simple pub/sub bus between apps on the same desktop (appNet.mjs)
+      try {
+        if (m === "GET") return send(res, 200, AN.read(String(parts[1] || "")));
+        if (m === "POST") {
+          const b = JSON.parse((await readBody(req, 200_000)).toString("utf8") || "{}");
+          return send(res, 200, AN.write(String(parts[1] || ""), b));
+        }
+      } catch (e) {
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    if (parts[0] === "pads-wire") {
+      // mouse/keyboard crossing between devices (padsWire.mjs): only from this computer
+      try {
+        if (!onThisPc(req)) return send(res, 403, { error: "The pads wire is controlled from the desktop's own computer." });
+        const b = JSON.parse((await readBody(req, 50_000)).toString("utf8") || "{}");
+        if (m === "POST") return send(res, 200, padsWire.send(b));
+      } catch (e) {
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    if (parts[0] === "pads-link") {
+      // linked SEASIDE servers: the realtime wire (padsLink.mjs)
+      try {
+        const b = JSON.parse((await readBody(req, 200_000)).toString("utf8") || "{}");
+        if (parts[1] === "send" && m === "POST") return send(res, 200, await padsLink.send(String(b.account || ""), b));
+        if (parts[1] === "roster" && m === "POST") return send(res, 200, await padsLink.roster(String(b.account || ""), b));
+      } catch (e) {
+        return send(res, e?.status ?? 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    if (parts[0] === "ws") {
+      // WebSocket upgrade endpoints
+      if (parts[1] === "frames" && m === "GET") return acceptSocket(req, res, url);
+      if (parts[1] === "duplex" && m === "GET") return openDuplex(req, res);
+    }
+    return send(res, 404, { error: "Not found" });
   }
 
   return {
-    name: "pandora-desk-server",
-    configResolved(config) {
-      root = config.root;
-      let saved = "";
-      try {
-        saved = JSON.parse(fs.readFileSync(configFile(), "utf8")).dataDir || "";
-      } catch {
-        saved = "";
-      }
-      // a folder saved on another kind of computer (a Windows D:\... copied over to a Mac) means nothing here: use the default
-      if (process.platform !== "win32" && /^[a-zA-Z]:[\\/]/.test(saved)) {
-        console.warn(`[pandora] The saved data folder ${saved} is a Windows path; using ./data instead (choose another in Settings).`);
-        saved = "";
-      }
-      dataDir = path.resolve(process.env.PDD_DATA || saved || path.join(root, "data"));
-      publicDir = config.publicDir || path.join(root, "public");
-    },
+    name: "desk-server",
     configureServer(server) {
-      server.httpServer?.on("upgrade", pictureSocket);
-      // the full browser closes with the desktop, so its profile is free next time
-      server.httpServer?.once("close", () => (void engine.close(), stdio.closeAll(), inbound.close()));
-      // (a listener here replaces Node's own exit on Ctrl+C, so it exits itself once the engine is closed)
-      for (const sig of ["SIGINT", "SIGTERM"]) process.once(sig, () => (stdio.closeAll(), void Promise.resolve(engine.close()).finally(() => process.exit(130))));
-      server.middlewares.use(handle);
+      server.middlewares.use(async (req, res, next) => {
+        const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+        if (url.pathname.startsWith("/api/")) return api(req, res, url);
+        // apps on 127.0.0.1 serve themselves from public/apps/<app>, with injected webxdc helpers
+        if (isAppHost(req)) {
+          const appName = url.pathname.split("/").filter(Boolean)[0];
+          if (appName) {
+            const appFile = path.join(publicDir || path.join(root, "public"), "apps", appName, "index.html");
+            if (fs.existsSync(appFile)) {
+              res.setHeader("Content-Security-Policy", XDC_CSP);
+              return serveFile(res, appFile, `${webxdcScript}\n${helperScript}`);
+            }
+          }
+          return serveFile(res, path.join(publicDir || path.join(root, "public"), "apps", "index.html"));
+        }
+        // the desktop on localhost serves index.html, with the Classic relay script injected so Classic can pair
+        if (url.pathname === "/" || url.pathname === "/index.html") {
+          const indexFile = path.join(publicDir || path.join(root, "public"), "index.html");
+          return serveFile(res, indexFile, classicRelayScript);
+        }
+        // a few files the desktop needs that are not part of the Vite build
+        if (url.pathname === "/webxdc.js") return serveFile(res, path.join(publicDir || path.join(root, "public"), "webxdc.js"));
+        if (url.pathname === "/helper.js") return serveFile(res, path.join(publicDir || path.join(root, "public"), "helper.js"));
+        if (url.pathname === "/relay.js") return serveFile(res, path.join(publicDir || path.join(root, "public"), "relay.js"));
+        next();
+      });
     },
-    configurePreviewServer(server) {
-      server.httpServer?.on("upgrade", pictureSocket);
-      server.middlewares.use(handle);
+    config(config) {
+      root = path.resolve(config.root || process.cwd());
+      dataDir = path.resolve(config.dataDir || path.join(root, "data"));
+      publicDir = config.publicDir ? path.resolve(config.publicDir) : path.join(root, "public");
+      fs.mkdirSync(dataDir, { recursive: true });
+    },
+    closeBundle() {
+      stdio.closeAll();
+      ngit.close();
+      engine.forgetLast();
+      heart.stop?.();
+      memory.stop?.();
+      terminals.closeAll();
+      luantiRelay.close();
+      browser.close();
+      vector().stop();
+      vectorHost().stop();
+      memory.stop?.();
+      ungoogled.stop();
+      devices.closeAll();
+      lanWatch.stop();
     },
   };
 }
