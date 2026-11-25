@@ -72,7 +72,7 @@ you move them with a backup (Settings → Backup).
 The characters need a model to talk. **Settings → AI**:
 
 - **Ollama on this computer** is set up already. Install Ollama, then for example `ollama pull qwen3:8b`, and press **Check**.
-- Add more connections: Ollama Cloud, Groq, llama.cpp, LM Studio, OpenRouter, any OpenAI-compatible server, or AICord characters. They're tried in order, so if one can't be reached the next one answers.
+- Add more connections: Ollama Cloud, Groq, llama.cpp, LM Studio, OpenRouter, or AICord characters. They're tried in order, so if one can't be reached the next one answers.
 - Each character can use their own connection and model (Characters → click a character).
 - API keys go in **Keys**. Connections refer to them by name.
 - Anything that isn't on this computer is blocked until you allow it in **Settings → Privacy**, after reading what it shares.
@@ -205,7 +205,7 @@ plain Wi-Fi http. See *On your phone* above.
 **Something looks stuck after an update.** Reload the page. If a window still shows old behaviour, close SEASIDE's
 terminal window and start it again: server changes need a restart.
 
-**Losing things.** Your desktop lives in this browser on this computer. Make a backup (Settings → Backup and reset)
+**Losing things.** Your desktop lives in this browser on your computer. Make a backup (Settings → Backup and reset)
 before clearing the browser's data, switching browsers or moving computers.
 
 ## 👩‍💻 For developers
@@ -215,9 +215,11 @@ npm test        # logic tests (flood gate, room, loop breaker, shell, privacy, b
 npm run build   # typecheck and build to dist/
 ```
 
-`server/` is the local server Vite runs (`/api` for the library and game state, `/run` for apps on the app origin). `scripts/classic.mjs` installs a new Classic build (`node scripts/classic.mjs pandora|jade <built.html> <version>`); `scripts/cutout.py` makes the transparent character cut-outs used in Hangout.
+Code map: `server/` is the local server Vite runs (`/api` for the library and game state, `/run` for apps on the app origin). `src/lib` is the logic (store, model connections, agent loop, tools, MCP client, bridges, privacy, flood gate, shell, voice); `src/apps` is one file per window; `src/ui` is the desktop, windows, menus and lock screen. `public/classic/pandora-dee.html` is the original page, untouched.
 
-Code map: `src/lib` is the logic (store, model connections, agent loop, tools, MCP client, bridges, privacy, flood gate, shell, voice); `src/apps` is one file per window; `src/ui` is the desktop, windows, menus and lock screen. `public/classic/pandora-dee.html` is the original page, untouched.
+### ngit-reader bridge
+
+The local server can expose an MCP bridge for [ngit-reader](https://gitworkshop.dev), a read-only MCP server for Nostr-hosted git repos (NIP-34 / gitworkshop.dev). Because ngit-reader is not published on npm, it is opt-in: set `ngitReader` in `pdd.config.json` to either a stdio command or an HTTP endpoint. When configured, the desktop serves `/api/ngit/tools`, `/api/ngit/config`, and `/api/ngit/call`, reusing the existing `createMcpStdio` host. See `server/ngit.mjs` and `server/ngit.test.mjs`.
 
 ### Vector's app inside the desktop
 
@@ -242,4 +244,3 @@ Join the AETHER-ENGINEERS group for questions, ideas, bug reports, or just to ch
 <br clear="left" />
 
 <sub>New to Vector? It's a private, encrypted messenger: get it at <a href="https://vectorapp.io">vectorapp.io</a>. Vector and its logo are trademarks of Formless Labs, used here to link to Vector.</sub>
-
